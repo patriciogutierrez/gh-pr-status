@@ -24,8 +24,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
     App, Application, Bounds, ClipboardItem, Context, FocusHandle, Focusable, KeyBinding,
-    SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, prelude::*,
-    px, rgb, size,
+    MouseButton, MouseDownEvent, Pixels, Point, SharedString, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, actions, anchored, deferred, div, prelude::*, px, rgb, size,
 };
 
 use github::{PullRequest, Review, Search, Snapshot};
@@ -79,6 +79,12 @@ enum Deploy {
     Confirming(Instant),
     Sending,
     Failed(String),
+}
+
+/// The menu a right click on a PR opens, where the click happened.
+struct Menu {
+    url: String,
+    at: Point<Pixels>,
 }
 
 /// What a tab last got back from `gh`.
@@ -149,6 +155,8 @@ struct Root {
     last_seen: Option<HashMap<String, notify::Seen>>,
     /// `/deploy` comments being confirmed, sent or that failed, by PR URL.
     deploys: HashMap<String, Deploy>,
+    /// The right-click menu, while it is open.
+    menu: Option<Menu>,
     focus_handle: FocusHandle,
 }
 
@@ -161,6 +169,7 @@ impl Root {
             expanded: HashSet::new(),
             last_seen: None,
             deploys: HashMap::new(),
+            menu: None,
             focus_handle: cx.focus_handle(),
         };
         root.start_clock(cx);
@@ -351,6 +360,49 @@ impl Root {
             })
     }
 
+    /// The right-click menu, drawn over everything at the click. Any click
+    /// outside it closes it.
+    fn menu(&self, menu: &Menu, cx: &mut Context<Self>) -> impl IntoElement {
+        let url = menu.url.clone();
+
+        deferred(
+            anchored().position(menu.at).snap_to_window().child(
+                div()
+                    .occlude()
+                    .flex()
+                    .flex_col()
+                    .p_1()
+                    .min_w(px(180.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .bg(rgb(theme::SURFACE))
+                    .shadow_lg()
+                    .text_sm()
+                    .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                        this.menu = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .id("menu-copy-url")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+                            .child("Copiar URL del PR")
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                                this.menu = None;
+                                cx.notify();
+                            })),
+                    ),
+            ),
+        )
+        .with_priority(1)
+    }
+
     fn refreshing(&self) -> bool {
         self.mine.in_flight || self.reviews.in_flight
     }
@@ -523,6 +575,16 @@ impl Root {
                                 div()
                                     .flex_1()
                                     .min_w(px(0.))
+                                    .on_mouse_down(MouseButton::Right, {
+                                        let url = pull.url.clone();
+                                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                            this.menu = Some(Menu {
+                                                url: url.clone(),
+                                                at: event.position,
+                                            });
+                                            cx.notify();
+                                        })
+                                    })
                                     .child(summary(pull, show_author)),
                             )
                             .child(self.actions(pull, cx)),
@@ -829,8 +891,9 @@ impl Render for Root {
             .child(self.header(cx))
             .child(self.tabs(cx))
             .child(self.body(cx))
+            .when_some(self.menu.as_ref(), |this, menu| this.child(self.menu(menu, cx)))
             .child(div().text_xs().text_color(rgb(theme::MUTED)).child(
-                "clic en el PR lo abre · clic en el pipeline lo despliega · cmd-r actualiza · cmd-1 / cmd-2 cambian de pestaña",
+                "clic en el PR lo abre · clic derecho copia su URL · clic en el pipeline lo despliega · cmd-r actualiza · cmd-1 / cmd-2 cambian de pestaña",
             ))
     }
 }
