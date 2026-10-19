@@ -18,14 +18,17 @@ mod tool;
 mod ui;
 
 use std::collections::{HashMap, HashSet};
+use std::env;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    App, Application, Bounds, Context, FocusHandle, Focusable, KeyBinding, SharedString,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
+    App, Application, Bounds, ClipboardItem, Context, FocusHandle, Focusable, KeyBinding,
+    SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, prelude::*,
+    px, rgb, size,
 };
 
-use github::{PullRequest, Search, Snapshot};
+use github::{PullRequest, Review, Search, Snapshot};
 use pipeline::{Pipeline, State};
 use status::Group;
 
@@ -41,6 +44,42 @@ const DEPLOY_REFRESH_EVERY: Duration = Duration::from_secs(20);
 const TICK: Duration = Duration::from_secs(5);
 /// Steps shown when a pipeline is expanded; errors are always shown on top.
 const RECENT_STEPS: usize = 8;
+/// The comment that starts the deploy pipeline on a PR.
+const DEPLOY_COMMAND: &str = "/deploy";
+/// How long the deploy button waits for the confirming second click.
+const CONFIRM_FOR: Duration = Duration::from_secs(5);
+
+/// Where the "Slack" button next to each PR goes: the channel in
+/// `GH_PR_STATUS_SLACK_CHANNEL`, straight in the Slack app when
+/// `GH_PR_STATUS_SLACK_TEAM` names the workspace, otherwise through slack.com's
+/// redirect. Workflow links only start from inside Slack, so the button opens
+/// the channel and copies the PR link for the workflow's form. Without a
+/// channel, there is no button.
+fn slack_channel() -> Option<&'static str> {
+    static LINK: OnceLock<Option<String>> = OnceLock::new();
+    LINK.get_or_init(|| {
+        let var = |name: &str| {
+            env::var(name)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let channel = var("GH_PR_STATUS_SLACK_CHANNEL")?;
+        Some(match var("GH_PR_STATUS_SLACK_TEAM") {
+            Some(team) => format!("slack://channel?team={team}&id={channel}"),
+            None => format!("https://slack.com/app_redirect?channel={channel}"),
+        })
+    })
+    .as_deref()
+}
+
+/// Where a PR's `/deploy` comment is. A PR missing from the map has none going.
+enum Deploy {
+    /// First click done; a second one before the deadline sends the comment.
+    Confirming(Instant),
+    Sending,
+    Failed(String),
+}
 
 /// What a tab last got back from `gh`.
 enum Load {
@@ -108,6 +147,8 @@ struct Root {
     /// Each PR's review and pipeline as of the last load, to notice what changed.
     /// `None` until the first load, which only sets the baseline.
     last_seen: Option<HashMap<String, notify::Seen>>,
+    /// `/deploy` comments being confirmed, sent or that failed, by PR URL.
+    deploys: HashMap<String, Deploy>,
     focus_handle: FocusHandle,
 }
 
@@ -119,6 +160,7 @@ impl Root {
             reviews: Feed::new(Search::ReviewRequested),
             expanded: HashSet::new(),
             last_seen: None,
+            deploys: HashMap::new(),
             focus_handle: cx.focus_handle(),
         };
         root.start_clock(cx);
@@ -220,6 +262,93 @@ impl Root {
             self.expanded.insert(url.to_string());
         }
         cx.notify();
+    }
+
+    /// The deploy button's click: the first one asks for confirmation, the
+    /// second one, within `CONFIRM_FOR`, comments `/deploy` on the PR and
+    /// reloads "Mis PRs" so the bot's run shows up.
+    fn deploy(&mut self, url: &str, cx: &mut Context<Self>) {
+        let confirmed = matches!(
+            self.deploys.get(url),
+            Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR
+        );
+        if !confirmed {
+            self.deploys
+                .insert(url.to_string(), Deploy::Confirming(Instant::now()));
+            cx.notify();
+            return;
+        }
+
+        self.deploys.insert(url.to_string(), Deploy::Sending);
+        cx.notify();
+
+        let url = url.to_string();
+        cx.spawn(async move |this, cx| {
+            let target = url.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { github::comment(&target, DEPLOY_COMMAND) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.deploys.remove(&url);
+                        this.reload(Search::Mine, cx);
+                    }
+                    Err(error) => {
+                        this.deploys.insert(url, Deploy::Failed(error));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The buttons to the right of a PR: ask for a review on Slack until the PR
+    /// is approved, and comment `/deploy` unless a run is already going. Only
+    /// on the user's own PRs.
+    fn actions(&self, pull: &PullRequest, cx: &mut Context<Self>) -> impl IntoElement {
+        let mine = pull.author == self.login().unwrap_or_default();
+        let slack = slack_channel().filter(|_| mine && pull.review != Review::Approved);
+        let deploying = pull
+            .pipeline
+            .as_ref()
+            .is_some_and(|run| run.state(now()) == State::Running);
+        let deploy = self.deploys.get(&pull.url);
+        let label = match deploy {
+            Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR => "¿Enviar /deploy?",
+            Some(Deploy::Sending) => "Enviando…",
+            _ => "/deploy",
+        };
+        let url = pull.url.clone();
+
+        div()
+            .flex()
+            .flex_shrink_0()
+            .gap_2()
+            .when_some(slack, |this, channel| {
+                let pull_url = pull.url.clone();
+                this.child(ui::button(
+                    SharedString::from(format!("slack-{}", pull.url)),
+                    "Slack",
+                    true,
+                    move |_event, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(pull_url.clone()));
+                        cx.open_url(channel);
+                    },
+                ))
+            })
+            .when(mine && !pull.draft && !deploying, |this| {
+                this.child(ui::button(
+                    SharedString::from(format!("deploy-{}", pull.url)),
+                    label,
+                    !matches!(deploy, Some(Deploy::Sending)),
+                    cx.listener(move |this, _event, _window, cx| this.deploy(&url, cx)),
+                ))
+            })
     }
 
     fn refreshing(&self) -> bool {
@@ -385,7 +514,33 @@ impl Root {
                     .gap_1()
                     .flex_1()
                     .min_w(px(0.))
-                    .child(summary(pull, show_author))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .items_start()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .child(summary(pull, show_author)),
+                            )
+                            .child(self.actions(pull, cx)),
+                    )
+                    .when_some(
+                        match self.deploys.get(&pull.url) {
+                            Some(Deploy::Failed(error)) => Some(error.clone()),
+                            _ => None,
+                        },
+                        |this, error| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme::RED))
+                                    .child(format!("No se pudo enviar /deploy: {error}")),
+                            )
+                        },
+                    )
                     .when_some(pull.pipeline.as_ref(), |this, run| {
                         this.child(self.pipeline_bar(pull, run, expanded, cx))
                             .when(expanded, |this| this.child(steps(pull, run)))

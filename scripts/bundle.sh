@@ -33,7 +33,7 @@ xml_escape() {
 }
 
 ENVIRONMENT=""
-for name in GH_PR_STATUS_BOT GH_PR_STATUS_GCP_PREPROD GH_PR_STATUS_GCP_PROD GH_PR_STATUS_GCP_DEVELOPMENT; do
+for name in GH_PR_STATUS_BOT GH_PR_STATUS_GCP_PREPROD GH_PR_STATUS_GCP_PROD GH_PR_STATUS_GCP_DEVELOPMENT GH_PR_STATUS_SLACK_CHANNEL GH_PR_STATUS_SLACK_TEAM; do
   if [[ -n "${!name:-}" ]]; then
     ENVIRONMENT+="    <key>$name</key>
     <string>$(xml_escape "${!name}")</string>
