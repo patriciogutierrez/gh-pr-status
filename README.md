@@ -117,6 +117,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   cuánto escribió el bot. **Clic en el pipeline** lo despliega: últimas 8 etapas con su
   hora, todos los errores (servicio y causa) y un botón para abrir el comentario.
 - **Clic en el PR** lo abre en el navegador.
+- **Clic derecho en el PR** abre un menú para copiar su URL.
 - Con `GH_PR_STATUS_SLACK_CHANNEL` definida, el botón **Slack** al lado de cada PR tuyo copia
   el link del PR y abre ese canal en Slack. Los workflows de Slack solo se inician desde dentro
   de Slack, así que desde ahí lo inicias (marcador del canal o menú `+`) y pegas el link. El
