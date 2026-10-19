@@ -51,6 +51,8 @@ de deploy** (ver [El pipeline](#el-pipeline)):
 | `GH_PR_STATUS_GCP_PREPROD` | Proyecto de GCP del ambiente pre-prod, tal como aparece en el link a los logs (`…?project=<id>`) | `acme-staging` |
 | `GH_PR_STATUS_GCP_PROD` | Proyecto de GCP de prod | `acme-prod` |
 | `GH_PR_STATUS_GCP_DEVELOPMENT` | Proyecto de GCP de development | `acme-dev` |
+| `GH_PR_STATUS_SLACK_CHANNEL` | ID del canal de Slack donde inicias tu workflow (por ejemplo, pedir review). Agrega un botón "Slack" al lado de cada PR | `C0123456789` |
+| `GH_PR_STATUS_SLACK_TEAM` | ID del workspace de Slack (`T…`, aparece en `app.slack.com/client/<id>/…`). Con él el canal se abre directo en la app de Slack; sin él pasa por el navegador | `T0123456789` |
 
 Los proyectos de GCP solo sirven para saber en qué ambiente falló un deploy cuando el
 mensaje de error no lo dice de otra forma; puedes omitirlos.
@@ -62,6 +64,8 @@ export GH_PR_STATUS_BOT=my-deploy-bot
 export GH_PR_STATUS_GCP_PREPROD=acme-staging
 export GH_PR_STATUS_GCP_PROD=acme-prod
 export GH_PR_STATUS_GCP_DEVELOPMENT=acme-dev
+export GH_PR_STATUS_SLACK_CHANNEL=C0123456789
+export GH_PR_STATUS_SLACK_TEAM=T0123456789
 ```
 
 ### 3. Instalar como app de macOS
@@ -113,6 +117,13 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   cuánto escribió el bot. **Clic en el pipeline** lo despliega: últimas 8 etapas con su
   hora, todos los errores (servicio y causa) y un botón para abrir el comentario.
 - **Clic en el PR** lo abre en el navegador.
+- Con `GH_PR_STATUS_SLACK_CHANNEL` definida, el botón **Slack** al lado de cada PR tuyo copia
+  el link del PR y abre ese canal en Slack. Los workflows de Slack solo se inician desde dentro
+  de Slack, así que desde ahí lo inicias (marcador del canal o menú `+`) y pegas el link. El
+  botón desaparece cuando el PR queda aprobado.
+- El botón **/deploy** comenta `/deploy` en el PR, como tu usuario de `gh`, para iniciar el
+  pipeline. Pide un segundo clic de confirmación (dentro de 5 s) y no aparece en borradores
+  ni mientras hay un deploy en curso.
 - Las listas se recargan solas cada minuto; mientras alguno de tus PRs está desplegando,
   "Mis PRs" se recarga cada 20 s.
 

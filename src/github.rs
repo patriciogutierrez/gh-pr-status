@@ -144,13 +144,38 @@ pub struct Snapshot {
 
 /// Runs the search through `gh api graphql`.
 pub fn fetch(search: Search) -> Result<Snapshot, String> {
+    let stdout = gh(&[
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        format!("query={QUERY}"),
+        "-f".to_string(),
+        format!("search={}", search.query()),
+        "-F".to_string(),
+        format!("withComments={}", search.with_comments()),
+    ])?;
+
+    let value: Value = serde_json::from_slice(&stdout)
+        .map_err(|error| format!("gh devolvió algo que no es JSON: {error}"))?;
+    parse(&value)
+}
+
+/// Posts `body` as a comment on the PR at `url`, as the user `gh` is logged in as.
+pub fn comment(url: &str, body: &str) -> Result<(), String> {
+    gh(&[
+        "pr".to_string(),
+        "comment".to_string(),
+        url.to_string(),
+        "--body".to_string(),
+        body.to_string(),
+    ])
+    .map(|_| ())
+}
+
+/// Runs `gh` and returns its stdout, or an error worth showing as is.
+fn gh(args: &[String]) -> Result<Vec<u8>, String> {
     let output = Command::new(tool::path("gh"))
-        .args(["api", "graphql", "-f"])
-        .arg(format!("query={QUERY}"))
-        .arg("-f")
-        .arg(format!("search={}", search.query()))
-        .arg("-F")
-        .arg(format!("withComments={}", search.with_comments()))
+        .args(args)
         .output()
         .map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => {
@@ -164,10 +189,7 @@ pub fn fetch(search: Search) -> Result<Snapshot, String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("gh terminó con error: {}", stderr.trim()));
     }
-
-    let value: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("gh devolvió algo que no es JSON: {error}"))?;
-    parse(&value)
+    Ok(output.stdout)
 }
 
 fn parse(value: &Value) -> Result<Snapshot, String> {
