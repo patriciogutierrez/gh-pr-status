@@ -831,8 +831,9 @@ fn steps(pull: &PullRequest, run: &Pipeline) -> impl IntoElement {
                 .gap_2()
                 .child(
                     div()
-                        .w(px(56.))
+                        .w(px(68.))
                         .flex_shrink_0()
+                        .whitespace_nowrap()
                         .font_family("Menlo")
                         .text_color(rgb(theme::MUTED))
                         .child(step.time.clone().unwrap_or_default()),
