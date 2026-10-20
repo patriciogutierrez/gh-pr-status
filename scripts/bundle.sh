@@ -3,7 +3,8 @@
 # Finder, the Dock or Spotlight without a Terminal window.
 #
 #   scripts/bundle.sh            # leaves the app in <target>/release/bundle/
-#   scripts/bundle.sh --install  # and copies it to ~/Applications
+#   scripts/bundle.sh --install  # moves it to ~/Applications instead, so
+#                                # Spotlight finds a single copy
 #
 # An app opened from Finder does not see the shell's variables, so the
 # GH_PR_STATUS_* ones set while bundling are written into Info.plist.
@@ -78,7 +79,7 @@ codesign --force --sign - "$APP"
 if [[ "${1:-}" == "--install" ]]; then
   mkdir -p "$HOME/Applications"
   rm -rf "$HOME/Applications/$APP_NAME.app"
-  cp -R "$APP" "$HOME/Applications/"
+  mv "$APP" "$HOME/Applications/"
   echo "Instalada en ~/Applications/$APP_NAME.app"
 else
   echo "App lista en $APP"

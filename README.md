@@ -85,7 +85,8 @@ Una app abierta desde Finder **no hereda las variables de tu shell**, así que
 `scripts/bundle.sh --install` y reinicia la app.
 
 El script también firma la app ad-hoc, suficiente para una app compilada y usada en el
-mismo Mac. Sin `--install` deja la app en `target/release/bundle/`.
+mismo Mac. Con `--install` la app se mueve a `~/Applications`, así Spotlight encuentra una sola
+copia; sin `--install` queda en `target/release/bundle/`.
 
 ### 4. Permitir las notificaciones
 
