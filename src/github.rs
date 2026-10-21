@@ -5,6 +5,7 @@
 //! the view hands these calls to the background executor, which is why nothing
 //! in this module touches GPUI.
 
+use std::collections::HashSet;
 use std::process::Command;
 
 use serde_json::Value;
@@ -32,6 +33,9 @@ query($search: String!, $withComments: Boolean!) {
           nodes { url updatedAt author { login } body }
         }
         latestReviews(first: 20) { nodes { state author { login } } }
+        reviewRequests(first: 10) {
+          nodes { requestedReviewer { ... on User { login } ... on Team { name } } }
+        }
         commits(last: 1) {
           nodes {
             commit {
@@ -39,8 +43,11 @@ query($search: String!, $withComments: Boolean!) {
                 state
                 contexts(first: 50) {
                   nodes {
-                    ... on CheckRun { name conclusion }
-                    ... on StatusContext { context state }
+                    ... on CheckRun {
+                      name conclusion detailsUrl title
+                      annotations(first: 10) @include(if: $withComments) { nodes { message annotationLevel } }
+                    }
+                    ... on StatusContext { context state targetUrl description }
                   }
                 }
               }
@@ -117,11 +124,12 @@ pub struct PullRequest {
     pub head: String,
     pub draft: bool,
     pub checks: Checks,
-    /// Names of the checks that failed, for the row's caption.
-    pub failing_checks: Vec<String>,
+    pub failing_checks: Vec<FailedCheck>,
     pub review: Review,
     /// Logins whose latest review approves the PR.
     pub approvers: Vec<String>,
+    /// Users and teams asked for a review who have not given it yet.
+    pub requested_reviewers: Vec<String>,
     pub mergeable: Mergeable,
     pub comments: u64,
     /// Seconds since the Unix epoch.
@@ -135,6 +143,16 @@ impl PullRequest {
     pub fn repo_name(&self) -> &str {
         self.repo.rsplit('/').next().unwrap_or(&self.repo)
     }
+}
+
+/// A check that failed on the PR's last commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailedCheck {
+    pub name: String,
+    /// Why it failed, when the check says more than its exit code.
+    pub reason: Option<String>,
+    /// Where its logs are.
+    pub url: Option<String>,
 }
 
 pub struct Snapshot {
@@ -237,6 +255,7 @@ fn parse_pull(node: &Value) -> Option<PullRequest> {
         failing_checks: failing_checks(rollup),
         review: parse_review(node),
         approvers: approvers(node),
+        requested_reviewers: requested_reviewers(node),
         mergeable: match node["mergeable"].as_str() {
             Some("MERGEABLE") => Mergeable::Clean,
             Some("CONFLICTING") => Mergeable::Conflicting,
@@ -260,11 +279,13 @@ fn parse_checks(rollup: &Value) -> Checks {
     }
 }
 
-fn failing_checks(rollup: &Value) -> Vec<String> {
+/// Each failed check once: a re-run check shows up again under the same name.
+fn failing_checks(rollup: &Value) -> Vec<FailedCheck> {
     let Some(contexts) = rollup["contexts"]["nodes"].as_array() else {
         return Vec::new();
     };
 
+    let mut seen = HashSet::new();
     contexts
         .iter()
         .filter_map(|context| {
@@ -273,9 +294,35 @@ fn failing_checks(rollup: &Value) -> Vec<String> {
                 Some("FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE")
             ) || matches!(context["state"].as_str(), Some("FAILURE" | "ERROR"));
             let name = context["name"].as_str().or(context["context"].as_str())?;
-            failed.then(|| name.to_string())
+            (failed && seen.insert(name)).then(|| FailedCheck {
+                name: name.to_string(),
+                reason: failure_reason(context),
+                url: context["detailsUrl"]
+                    .as_str()
+                    .or(context["targetUrl"].as_str())
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_string),
+            })
         })
         .collect()
+}
+
+/// The first failure annotation that is not GitHub Actions' "Process completed
+/// with exit code N.", else the check's own title or description. Warnings and
+/// notices are about the runner, not about what broke.
+fn failure_reason(context: &Value) -> Option<String> {
+    let annotations = context["annotations"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten();
+    annotations
+        .filter(|annotation| annotation["annotationLevel"].as_str() == Some("FAILURE"))
+        .filter_map(|annotation| annotation["message"].as_str())
+        .find(|message| !message.starts_with("Process completed with exit code"))
+        .or(context["title"].as_str())
+        .or(context["description"].as_str())
+        .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+        .map(str::to_string)
 }
 
 fn approvers(node: &Value) -> Vec<String> {
@@ -287,6 +334,21 @@ fn approvers(node: &Value) -> Vec<String> {
         .iter()
         .filter(|review| review["state"].as_str() == Some("APPROVED"))
         .filter_map(|review| review["author"]["login"].as_str().map(str::to_string))
+        .collect()
+}
+
+fn requested_reviewers(node: &Value) -> Vec<String> {
+    let Some(requests) = node["reviewRequests"]["nodes"].as_array() else {
+        return Vec::new();
+    };
+
+    requests
+        .iter()
+        .filter_map(|request| {
+            let reviewer = &request["requestedReviewer"];
+            reviewer["login"].as_str().or(reviewer["name"].as_str())
+        })
+        .map(str::to_string)
         .collect()
 }
 
@@ -390,8 +452,53 @@ mod tests {
         ))
         .unwrap();
 
+        let names: Vec<_> = pull
+            .failing_checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect();
+
         assert_eq!(pull.checks, Checks::Failing);
-        assert_eq!(pull.failing_checks, vec!["tests", "deploy"]);
+        assert_eq!(names, vec!["tests", "deploy"]);
+    }
+
+    #[test]
+    fn a_failed_check_explains_itself_past_the_exit_code() {
+        let rollup = json!({ "state": "FAILURE", "contexts": { "nodes": [
+            {
+                "name": "tests",
+                "conclusion": "FAILURE",
+                "detailsUrl": "https://github.com/acme/payments/actions/runs/1",
+                "annotations": { "nodes": [
+                    { "message": "The ubuntu-latest label will migrate", "annotationLevel": "WARNING" },
+                    { "message": "Process completed with exit code 1.", "annotationLevel": "FAILURE" },
+                    { "message": "\nAssertionError: expected 2\nmore", "annotationLevel": "FAILURE" }
+                ]}
+            },
+            { "name": "tests", "conclusion": "FAILURE" },
+            { "context": "deploy", "state": "ERROR", "description": "Build failed", "targetUrl": "" }
+        ]}});
+
+        let pull = parse_pull(&node(
+            json!({ "commits": { "nodes": [{ "commit": { "statusCheckRollup": rollup } }] } }),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            pull.failing_checks,
+            vec![
+                FailedCheck {
+                    name: "tests".to_string(),
+                    reason: Some("AssertionError: expected 2".to_string()),
+                    url: Some("https://github.com/acme/payments/actions/runs/1".to_string()),
+                },
+                FailedCheck {
+                    name: "deploy".to_string(),
+                    reason: Some("Build failed".to_string()),
+                    url: None,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -414,6 +521,19 @@ mod tests {
         let pull = parse_pull(&node(json!({ "latestReviews": reviews }))).unwrap();
 
         assert_eq!(pull.approvers, ["ana"]);
+    }
+
+    #[test]
+    fn lists_who_still_has_to_review() {
+        let requests = json!({ "nodes": [
+            { "requestedReviewer": { "login": "carla" } },
+            { "requestedReviewer": { "name": "payments-cl" } },
+            { "requestedReviewer": {} }
+        ]});
+
+        let pull = parse_pull(&node(json!({ "reviewRequests": requests }))).unwrap();
+
+        assert_eq!(pull.requested_reviewers, ["carla", "payments-cl"]);
     }
 
     #[test]

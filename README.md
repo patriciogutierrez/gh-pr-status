@@ -7,17 +7,13 @@ notificaciones de macOS cuando un deploy avanza o falla y cuando te aprueban un 
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│ Pull requests                          [Actualizar]  │
-│ @octocat · actualizado hace 2 min                    │
-│ [Mis PRs (5)] [Me piden review (3)]                  │
-│ ┌──────────┐┌──────────┐┌──────────┐┌──────────┐     │
-│ │ 2        ││ 1        ││ 2        ││ 0        │     │
-│ │ Atención ││ Listos   ││ Esperando││ Borrador │     │
-│ └──────────┘└──────────┘└──────────┘└──────────┘     │
+│ [Mis PRs (5)] [Me piden review]  actualizado… [Actua]│
+│ 2 atención  1 listos  2 esperando  0 borradores      │
 │ NECESITAN TU ATENCIÓN 2                              │
-│ ▌ payments #539 · master ← feat/…        hace 2 h    │
+│ ▌ payments #539 · master ← feat/…  hace 2 h [/deploy]│
 │ ▌ Registrar la redirección del formulario…           │
-│ ▌ [✗ CI] [Aprobado] [💬 2]  falla: tests             │
+│ ▌ [✗ CI] [Aprobado por @ana] [💬 2]                  │
+│ ▌ ✗ tests   AssertionError: expected 2               │
 │ ▌ ▸ [✗ Deploy falló] [pre-prod ✗] 🚨 Falló el read…  │
 │ LISTOS PARA MERGE 1                                  │
 │ ▌ …                                                  │
@@ -112,7 +108,9 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   - **Borradores.**
 - **Me piden review** lista los PRs abiertos donde alguien pidió tu review, con el autor.
 - Cada fila muestra repo, número, rama base y rama head, la última actualización, y
-  badges de CI, review y conflictos. Si el CI falla, muestra qué checks fallaron.
+  badges de CI, review y conflictos. El de review dice quién aprobó o a quién se le pidió
+  review. Si el CI falla, lista cada check fallido con el motivo (la primera anotación de
+  error que no sea el código de salida) y el clic en el check abre sus logs.
 - Si configuraste el bot, debajo de cada PR tuyo está su **último pipeline**: estado
   (desplegando, desplegado, falló, sin avances), la etapa actual o el primer error, y hace
   cuánto escribió el bot. **Clic en el pipeline** lo despliega: últimas 8 etapas con su
@@ -210,13 +208,13 @@ cargo clippy --all-targets
 
 | Archivo | Contenido |
 | --- | --- |
-| `src/main.rs` | La vista `Root`: pestañas, resumen, secciones, filas y recarga periódica |
+| `src/main.rs` | La vista `Root`: encabezado, contadores, secciones, filas y recarga periódica |
 | `src/github.rs` | La consulta GraphQL vía `gh`, el parseo de la respuesta y las fechas |
 | `src/pipeline.rs` | La configuración del bot y el parseo de sus comentarios: etapas, horas, errores y estado |
 | `src/notify.rs` | Detecta hitos de deploy y PRs aprobados, y manda la notificación de macOS |
 | `src/tool.rs` | Encuentra `gh` y los notificadores aunque la app no herede el `PATH` del shell |
 | `src/status.rs` | En qué grupo cae un PR, sus badges y el "hace N min" |
-| `src/ui.rs` | Botones, pestañas, badges y contadores compartidos |
+| `src/ui.rs` | Botones, pestañas y badges compartidos |
 | `src/theme.rs` | Colores (Catppuccin Mocha) |
 | `scripts/bundle.sh` | Compila en release y arma el `.app` |
 

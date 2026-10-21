@@ -321,7 +321,8 @@ impl Root {
     /// on the user's own PRs.
     fn actions(&self, pull: &PullRequest, cx: &mut Context<Self>) -> impl IntoElement {
         let mine = pull.author == self.login().unwrap_or_default();
-        let slack = slack_channel().filter(|_| mine && pull.review != Review::Approved);
+        let slack =
+            slack_channel().filter(|_| mine && !pull.draft && pull.review != Review::Approved);
         let deploying = pull
             .pipeline
             .as_ref()
@@ -337,7 +338,7 @@ impl Root {
         div()
             .flex()
             .flex_shrink_0()
-            .gap_2()
+            .gap_1()
             .when_some(slack, |this, channel| {
                 let pull_url = pull.url.clone();
                 this.child(ui::button(
@@ -420,26 +421,33 @@ impl Root {
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut caption = match (self.login(), self.mine.fetched_at) {
-            (Some(login), Some(at)) => format!(
-                "@{login} · actualizado {}",
-                status::ago(at.elapsed().as_secs() as i64)
-            ),
+            (Some(_), Some(at)) => {
+                format!("actualizado {}", status::ago(at.elapsed().as_secs() as i64))
+            }
             _ => "consultando GitHub…".to_string(),
         };
         let deploying = self.mine.deploying(now());
         if deploying > 0 {
             caption.push_str(&format!(
-                " · siguiendo {deploying} despliegue{} cada {} s",
-                if deploying == 1 { "" } else { "s" },
-                DEPLOY_REFRESH_EVERY.as_secs()
+                " · {deploying} despliegue{} en curso",
+                if deploying == 1 { "" } else { "s" }
             ));
         }
 
         div()
             .flex()
-            .items_end()
-            .gap_4()
-            .child(div().flex_1().child(ui::heading("Pull requests", caption)))
+            .items_center()
+            .gap_3()
+            .child(self.tabs(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(rgb(theme::MUTED))
+                    .child(caption),
+            )
             .child(ui::button(
                 "refresh",
                 if self.refreshing() {
@@ -496,7 +504,7 @@ impl Root {
         }
     }
 
-    /// The user's own PRs: a summary of the groups, then one section per group.
+    /// The user's own PRs: a one-line count per group, then one section per group.
     fn mine_list(&self, pulls: &[PullRequest], cx: &mut Context<Self>) -> impl IntoElement {
         let now = now();
         let in_group = |group: Group| {
@@ -518,15 +526,24 @@ impl Root {
         div()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .flex_1()
             .min_h(px(0.))
             .child(
-                div().flex().gap_2().children(
-                    Group::ALL.map(|group| {
-                        ui::stat(in_group(group).count(), group.title(), group.color())
-                    }),
-                ),
+                div()
+                    .flex()
+                    .gap_3()
+                    .text_xs()
+                    .children(Group::ALL.map(|group| {
+                        let count = in_group(group).count();
+                        div()
+                            .text_color(rgb(if count == 0 {
+                                theme::MUTED
+                            } else {
+                                group.color()
+                            }))
+                            .child(format!("{count} {}", group.short()))
+                    })),
             )
             .child(list("mine").children(sections))
     }
@@ -589,6 +606,9 @@ impl Root {
                             )
                             .child(self.actions(pull, cx)),
                     )
+                    .when(!pull.failing_checks.is_empty(), |this| {
+                        this.child(failures(pull))
+                    })
                     .when_some(
                         match self.deploys.get(&pull.url) {
                             Some(Deploy::Failed(error)) => Some(error.clone()),
@@ -781,16 +801,57 @@ fn summary(pull: &PullRequest, show_author: bool) -> impl IntoElement {
                 )
                 .when(pull.comments > 0, |this| {
                     this.child(ui::badge(format!("💬 {}", pull.comments), theme::SUBTEXT))
-                })
-                .when(!pull.failing_checks.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_xs()
-                            .text_color(rgb(theme::RED))
-                            .child(format!("falla: {}", pull.failing_checks.join(", "))),
-                    )
+                }),
+        )
+}
+
+/// Every failed check with why it failed; clicking one opens its logs.
+fn failures(pull: &PullRequest) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .p_1()
+        .rounded_md()
+        .bg(rgb(theme::MANTLE))
+        .text_xs()
+        .children(
+            pull.failing_checks
+                .iter()
+                .enumerate()
+                .map(|(index, check)| {
+                    let url = check.url.clone();
+                    div()
+                        .id(SharedString::from(format!("check-{index}-{}", pull.url)))
+                        .flex()
+                        .gap_2()
+                        .px_1()
+                        .rounded_sm()
+                        .when_some(url, |this, url| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+                                .on_click(move |_event, _window, cx| cx.open_url(&url))
+                        })
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(rgb(theme::RED))
+                                .child(format!("✗ {}", check.name)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_color(rgb(theme::SUBTEXT))
+                                .child(check.reason.clone().unwrap_or_else(|| {
+                                    if check.url.is_some() {
+                                        "ver logs".to_string()
+                                    } else {
+                                        String::new()
+                                    }
+                                })),
+                        )
                 }),
         )
 }
@@ -884,17 +945,16 @@ impl Render for Root {
             }))
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .size_full()
-            .p_5()
+            .p_4()
             .bg(rgb(theme::BASE))
             .text_color(rgb(theme::TEXT))
             .child(self.header(cx))
-            .child(self.tabs(cx))
             .child(self.body(cx))
             .when_some(self.menu.as_ref(), |this, menu| this.child(self.menu(menu, cx)))
             .child(div().text_xs().text_color(rgb(theme::MUTED)).child(
-                "clic en el PR lo abre · clic derecho copia su URL · clic en el pipeline lo despliega · cmd-r actualiza · cmd-1 / cmd-2 cambian de pestaña",
+                "clic abre el PR · clic derecho copia su URL · clic en un check abre sus logs · cmd-r actualiza · cmd-1/2 pestañas",
             ))
     }
 }

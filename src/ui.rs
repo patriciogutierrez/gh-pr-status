@@ -5,8 +5,8 @@ use gpui::{App, ClickEvent, ElementId, SharedString, Window, div, prelude::*, rg
 
 use crate::theme;
 
-/// A regular pill button. `enabled == false` drops the click handler and the
-/// hover/active styling, so it reads as inert.
+/// A compact outlined button for actions inside a row, so it stands out from
+/// the row's own surface.
 pub fn button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -16,17 +16,16 @@ pub fn button(
     div()
         .id(id)
         .flex()
+        .flex_shrink_0()
         .items_center()
-        .justify_center()
-        .h_8()
-        .px_3()
-        .rounded_lg()
-        .bg(rgb(if enabled {
-            theme::SURFACE
-        } else {
-            theme::MANTLE
-        }))
-        .text_sm()
+        .h_6()
+        .px_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(theme::BORDER))
+        .bg(rgb(theme::MANTLE))
+        .text_xs()
+        .whitespace_nowrap()
         .text_color(rgb(if enabled { theme::TEXT } else { theme::MUTED }))
         .when(enabled, |this| {
             this.cursor_pointer()
@@ -75,28 +74,6 @@ pub fn toggle_button(
         .on_click(on_click)
 }
 
-/// A screen heading: title on top, dimmed caption underneath.
-pub fn heading(
-    title: impl Into<SharedString>,
-    caption: impl Into<SharedString>,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .text_lg()
-                .text_color(rgb(theme::ACCENT))
-                .child(title.into()),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(theme::MUTED))
-                .child(caption.into()),
-        )
-}
-
 /// A small colored status label.
 pub fn badge(label: impl Into<SharedString>, color: u32) -> impl IntoElement {
     div()
@@ -108,28 +85,4 @@ pub fn badge(label: impl Into<SharedString>, color: u32) -> impl IntoElement {
         .text_xs()
         .text_color(rgb(color))
         .child(label.into())
-}
-
-/// A count with its caption, for the summary row.
-pub fn stat(count: usize, caption: impl Into<SharedString>, color: u32) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .gap_0p5()
-        .p_3()
-        .rounded_lg()
-        .bg(rgb(theme::SURFACE))
-        .child(
-            div()
-                .text_xl()
-                .text_color(rgb(if count == 0 { theme::MUTED } else { color }))
-                .child(count.to_string()),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(theme::SUBTEXT))
-                .child(caption.into()),
-        )
 }
