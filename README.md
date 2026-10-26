@@ -7,7 +7,7 @@ notificaciones de macOS cuando un deploy avanza o falla y cuando te aprueban un 
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│ [Mis PRs (5)] [Me piden review]  actualizado… [Actua]│
+│ [Mis PRs (5)] [Mergeadas]   actualizado…     [Actua]│
 │ 2 atención  1 listos  2 esperando  0 borradores      │
 │ NECESITAN TU ATENCIÓN 2                              │
 │ ▌ payments #539 · master ← feat/…  hace 2 h [/deploy]│
@@ -106,7 +106,22 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   - **Listos para merge:** aprobado, CI verde y sin conflictos.
   - **Esperando CI o review:** CI corriendo, falta review, o GitHub todavía no calcula si hay conflictos.
   - **Borradores.**
-- **Me piden review** lista los PRs abiertos donde alguien pidió tu review, con el autor.
+- **Mergeadas** lista tus PRs mergeados agrupados por día (Hoy, Ayer, «martes 13 oct»…), con
+  la hora del merge. El registro parte el lunes de la semana pasada y se guarda en
+  `~/Library/Application Support/gh-pr-status/merged.sqlite`: cada 5 minutos la app solo pide
+  a GitHub lo mergeado desde la última sincronización (normalmente, hoy). Si la búsqueda de
+  GitHub devuelve menos resultados de los que cuenta, guarda los que llegaron y vuelve a pedir
+  los mismos días en la siguiente. Muestra los últimos 60 días; los anteriores quedan en el
+  archivo. Borrarlo reinicia el registro.
+- **Grupos**, en la barra izquierda, para ordenar los PRs cuando son muchos. Arrastra una fila
+  (abierta o mergeada) a un grupo para moverla ahí, a «Sin grupo» para sacarla, o a
+  «+ Nuevo grupo» para crear uno con ella adentro. Al elegir un grupo, las dos pestañas
+  muestran solo sus PRs, y «Mis PRs» agrega al final sus mergeados, así ves en una sola vista
+  lo que falta y lo que ya salió. Clic derecho sobre un grupo para renombrarlo o eliminarlo
+  (sus PRs vuelven a «Sin grupo»). Un PR está en un solo grupo y se recuerda por su URL, así
+  que sigue ahí después de mergearse. Se guardan en
+  `~/Library/Application Support/gh-pr-status/groups.sqlite`. El nombre se escribe sin un
+  campo de texto nativo: los acentos con tecla muerta (´ + a) no se componen.
 - Cada fila muestra repo, número, rama base y rama head, la última actualización, y
   badges de CI, review y conflictos. El de review dice quién aprobó o a quién se le pidió
   review. Si el CI falla, lista cada check fallido con el motivo (la primera anotación de
@@ -131,7 +146,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
 | --- | --- |
 | `cmd-r` | actualiza |
 | `cmd-1` | pestaña Mis PRs |
-| `cmd-2` | pestaña Me piden review |
+| `cmd-2` | pestaña Mergeadas |
 | `cmd-q` | sale |
 
 ### Notificaciones
@@ -177,14 +192,14 @@ Si tu bot usa otro formato, el parser está en `src/pipeline.rs`.
 
 ## Cuánto cuesta el polling
 
-Cada recarga es una llamada GraphQL por pestaña: 2 puntos la de tus PRs (pide los últimos
-comentarios, solo de tus PRs) y 1 la de reviews, de un presupuesto de 5.000 puntos por hora
-que comparten todas tus herramientas que usan `gh`.
+Cada recarga de tus PRs es una llamada GraphQL de 2 puntos (pide los últimos comentarios),
+de un presupuesto de 5.000 puntos por hora que comparten todas tus herramientas que usan `gh`. La de mergeadas cuesta 1 punto cada 5
+minutos (~12 por hora).
 
 | Situación | Puntos por hora | % del límite |
 | --- | --- | --- |
-| Sin despliegues (todo cada 60 s) | ~180 | ~4 % |
-| Con un despliegue en curso ("Mis PRs" cada 20 s) | ~420 | ~8 % |
+| Sin despliegues (todo cada 60 s) | ~130 | ~3 % |
+| Con un despliegue en curso ("Mis PRs" cada 20 s) | ~370 | ~7 % |
 
 El estado de review sale de `reviewDecision`, que solo existe cuando el branch protection
 exige reviews; si no, la app usa la última review de cada revisor.
@@ -211,6 +226,9 @@ cargo clippy --all-targets
 | `src/main.rs` | La vista `Root`: encabezado, contadores, secciones, filas y recarga periódica |
 | `src/github.rs` | La consulta GraphQL vía `gh`, el parseo de la respuesta y las fechas |
 | `src/pipeline.rs` | La configuración del bot y el parseo de sus comentarios: etapas, horas, errores y estado |
+| `src/folders.rs` | Los grupos de PRs y a cuál pertenece cada uno, en SQLite |
+| `src/db.rs` | Dónde se abren los archivos SQLite locales |
+| `src/merged.rs` | Los PRs mergeados: la búsqueda en GitHub, el registro en SQLite y los días en hora local |
 | `src/notify.rs` | Detecta hitos de deploy y PRs aprobados, y manda la notificación de macOS |
 | `src/tool.rs` | Encuentra `gh` y los notificadores aunque la app no herede el `PATH` del shell |
 | `src/status.rs` | En qué grupo cae un PR, sus badges y el "hace N min" |

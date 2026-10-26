@@ -14,12 +14,9 @@ use crate::pipeline::{Pipeline, Settings};
 use crate::tool;
 
 /// One search, one page. Fifty is more open PRs than anyone should have.
-///
-/// The latest comments carry the pipeline bot's report, but only the user's own
-/// PRs need them: on other people's PRs those comments run to hundreds of KB and
-/// turn a two-second search into a ten-second one.
+/// The latest comments carry the pipeline bot's report.
 const QUERY: &str = r#"
-query($search: String!, $withComments: Boolean!) {
+query($search: String!) {
   viewer { login }
   search(query: $search, type: ISSUE, first: 50) {
     nodes {
@@ -29,7 +26,7 @@ query($search: String!, $withComments: Boolean!) {
         author { login }
         repository { nameWithOwner }
         comments { totalCount }
-        recentComments: comments(last: 10) @include(if: $withComments) {
+        recentComments: comments(last: 10) {
           nodes { url updatedAt author { login } body }
         }
         latestReviews(first: 20) { nodes { state author { login } } }
@@ -45,7 +42,7 @@ query($search: String!, $withComments: Boolean!) {
                   nodes {
                     ... on CheckRun {
                       name conclusion detailsUrl title
-                      annotations(first: 10) @include(if: $withComments) { nodes { message annotationLevel } }
+                      annotations(first: 10) { nodes { message annotationLevel } }
                     }
                     ... on StatusContext { context state targetUrl description }
                   }
@@ -60,30 +57,8 @@ query($search: String!, $withComments: Boolean!) {
 }
 "#;
 
-/// Which list a tab shows.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Search {
-    /// Open PRs the user authored.
-    Mine,
-    /// Open PRs where someone asked the user for a review.
-    ReviewRequested,
-}
-
-impl Search {
-    fn query(self) -> &'static str {
-        match self {
-            Search::Mine => "is:pr is:open archived:false author:@me sort:updated-desc",
-            Search::ReviewRequested => {
-                "is:pr is:open archived:false review-requested:@me sort:updated-desc"
-            }
-        }
-    }
-
-    /// Whether the search also brings the pipeline bot's comments.
-    fn with_comments(self) -> bool {
-        self == Search::Mine
-    }
-}
+/// The user's open PRs, most recently updated first.
+const SEARCH: &str = "is:pr is:open archived:false author:@me sort:updated-desc";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Checks {
@@ -161,16 +136,14 @@ pub struct Snapshot {
 }
 
 /// Runs the search through `gh api graphql`.
-pub fn fetch(search: Search) -> Result<Snapshot, String> {
+pub fn fetch() -> Result<Snapshot, String> {
     let stdout = gh(&[
         "api".to_string(),
         "graphql".to_string(),
         "-f".to_string(),
         format!("query={QUERY}"),
         "-f".to_string(),
-        format!("search={}", search.query()),
-        "-F".to_string(),
-        format!("withComments={}", search.with_comments()),
+        format!("search={SEARCH}"),
     ])?;
 
     let value: Value = serde_json::from_slice(&stdout)
@@ -191,7 +164,7 @@ pub fn comment(url: &str, body: &str) -> Result<(), String> {
 }
 
 /// Runs `gh` and returns its stdout, or an error worth showing as is.
-fn gh(args: &[String]) -> Result<Vec<u8>, String> {
+pub fn gh(args: &[String]) -> Result<Vec<u8>, String> {
     let output = Command::new(tool::path("gh"))
         .args(args)
         .output()
@@ -572,7 +545,7 @@ mod tests {
             return;
         }
 
-        let snapshot = fetch(Search::Mine).unwrap();
+        let snapshot = fetch().unwrap();
 
         assert!(!snapshot.login.is_empty());
         assert!(snapshot.pulls.iter().all(|pull| pull.updated_at > 0));

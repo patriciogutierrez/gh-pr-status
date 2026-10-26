@@ -10,7 +10,6 @@ pub const TEXT: u32 = 0xcdd6f4;
 pub const SUBTEXT: u32 = 0xa6adc8;
 pub const MUTED: u32 = 0x6c7086;
 pub const ACCENT: u32 = 0xcba6f7;
-pub const BLUE: u32 = 0x89b4fa;
 pub const GREEN: u32 = 0xa6e3a1;
 pub const RED: u32 = 0xf38ba8;
 pub const YELLOW: u32 = 0xf9e2af;
