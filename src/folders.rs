@@ -7,9 +7,12 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db;
+
+/// Where the sidebar's width is remembered.
+const SIDEBAR_WIDTH: &str = "sidebar_width";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Folder {
@@ -69,6 +72,36 @@ pub fn assign(url: &str, folder: Option<i64>) -> Result<(), String> {
     write_assignment(&open()?, url, folder)
 }
 
+/// How wide the user last left the sidebar, in pixels.
+pub fn sidebar_width() -> Result<Option<f32>, String> {
+    read_width(&open()?)
+}
+
+pub fn save_sidebar_width(width: f32) -> Result<(), String> {
+    write_width(&open()?, width)
+}
+
+fn read_width(db: &Connection) -> Result<Option<f32>, String> {
+    db.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![SIDEBAR_WIDTH],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map(|value| value.and_then(|width| width.parse().ok()))
+    .map_err(db_error)
+}
+
+fn write_width(db: &Connection, width: f32) -> Result<(), String> {
+    db.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![SIDEBAR_WIDTH, width.to_string()],
+    )
+    .map(drop)
+    .map_err(db_error)
+}
+
 fn write_assignment(db: &Connection, url: &str, folder: Option<i64>) -> Result<(), String> {
     match folder {
         Some(id) => db.execute(
@@ -124,7 +157,8 @@ fn migrate(db: &Connection) -> Result<(), String> {
              url TEXT PRIMARY KEY,
              folder_id INTEGER NOT NULL
          );
-         CREATE INDEX IF NOT EXISTS members_by_folder ON members (folder_id);",
+         CREATE INDEX IF NOT EXISTS members_by_folder ON members (folder_id);
+         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )
     .map_err(db_error)
 }
@@ -167,6 +201,17 @@ mod tests {
 
         assert_eq!(moved, Some(second));
         assert!(read(&db).unwrap().by_url.is_empty());
+    }
+
+    #[test]
+    fn the_sidebar_width_is_remembered_once_saved() {
+        let db = db();
+
+        let before = read_width(&db).unwrap();
+        write_width(&db, 240.).unwrap();
+
+        assert_eq!(before, None);
+        assert_eq!(read_width(&db).unwrap(), Some(240.));
     }
 
     #[test]

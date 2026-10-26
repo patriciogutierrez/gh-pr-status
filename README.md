@@ -119,7 +119,8 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   muestran solo sus PRs, y «Mis PRs» agrega al final sus mergeados, así ves en una sola vista
   lo que falta y lo que ya salió. Clic derecho sobre un grupo para renombrarlo o eliminarlo
   (sus PRs vuelven a «Sin grupo»). Un PR está en un solo grupo y se recuerda por su URL, así
-  que sigue ahí después de mergearse. Se guardan en
+  que sigue ahí después de mergearse. Arrastra la línea entre la barra y los PRs para
+  cambiar su ancho, que se recuerda al reiniciar. Se guardan en
   `~/Library/Application Support/gh-pr-status/groups.sqlite`. El nombre se escribe sin un
   campo de texto nativo: los acentos con tecla muerta (´ + a) no se componen.
 - Cada fila muestra repo, número, rama base y rama head, la última actualización, y

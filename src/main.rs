@@ -56,11 +56,16 @@ const RECENT_STEPS: usize = 8;
 const DEPLOY_COMMAND: &str = "/deploy";
 /// How long the deploy button waits for the confirming second click.
 const CONFIRM_FOR: Duration = Duration::from_secs(5);
-/// The sidebar's width, and the room its counts take, which leave a fixed
-/// width for each name: 180 minus padding, border, gap and count.
+/// The sidebar's width until the user drags its edge, and how far it goes.
 const SIDEBAR_WIDTH: f32 = 180.;
+const SIDEBAR_MIN: f32 = 140.;
+const SIDEBAR_MAX: f32 = 480.;
+/// The strip between the sidebar and the PRs that resizes the sidebar.
+const HANDLE_WIDTH: f32 = 16.;
+/// The room a sidebar entry's count takes; with padding, border and gap it
+/// leaves the rest of the sidebar's width to the name.
 const COUNT_WIDTH: f32 = 20.;
-const LABEL_WIDTH: f32 = SIDEBAR_WIDTH - 2. * 8. - 2. - 8. - COUNT_WIDTH;
+const ENTRY_CHROME: f32 = 2. * 8. + 2. + 8. + COUNT_WIDTH;
 /// A hovered name that doesn't fit waits `MARQUEE_WAIT`, slides left at
 /// `MARQUEE_SPEED` pixels a second until its end shows, holds `MARQUEE_HOLD`,
 /// slides back in `MARQUEE_RETURN`, and starts over.
@@ -136,6 +141,16 @@ enum Editing {
         pull: Option<String>,
     },
     Rename(i64),
+}
+
+/// What the handle carries while the sidebar's edge is dragged. It draws
+/// nothing; the sidebar itself follows the cursor.
+struct ResizeSidebar;
+
+impl Render for ResizeSidebar {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
 }
 
 /// What a PR row carries while it is dragged onto a group.
@@ -274,6 +289,7 @@ struct Root {
     editor: Option<Editor>,
     /// The sidebar entry under the mouse, whose name scrolls if it is cut.
     hovered: Option<Filter>,
+    sidebar_width: f32,
     focus_handle: FocusHandle,
 }
 
@@ -292,10 +308,12 @@ impl Root {
             filter: Filter::All,
             editor: None,
             hovered: None,
+            sidebar_width: SIDEBAR_WIDTH,
             focus_handle: cx.focus_handle(),
         };
         root.start_clock(cx);
         Self::load_folders(cx);
+        Self::load_sidebar_width(cx);
         root
     }
 
@@ -444,6 +462,56 @@ impl Root {
             .ok();
         })
         .detach();
+    }
+
+    fn load_sidebar_width(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { folders::sidebar_width() })
+                .await;
+
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(Some(width)) => this.sidebar_width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+                    Ok(None) => {}
+                    Err(error) => this.folders_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Follows the cursor while the sidebar's edge is dragged; `left` is where
+    /// the sidebar starts.
+    fn resize_sidebar(&mut self, cursor: Pixels, left: Pixels, cx: &mut Context<Self>) {
+        let width = (f32::from(cursor - left) - HANDLE_WIDTH / 2.).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        if width != self.sidebar_width {
+            self.sidebar_width = width;
+            cx.notify();
+        }
+    }
+
+    /// The strip between the sidebar and the PRs. Dragging it resizes the
+    /// sidebar; the width is saved once it is let go.
+    fn sidebar_handle(&self) -> impl IntoElement {
+        div()
+            .id("sidebar-handle")
+            .group("sidebar-handle")
+            .flex()
+            .justify_center()
+            .w(px(HANDLE_WIDTH))
+            .flex_shrink_0()
+            .cursor(gpui::CursorStyle::ResizeLeftRight)
+            .on_drag(ResizeSidebar, |_, _, _, cx| cx.new(|_| ResizeSidebar))
+            .child(
+                div()
+                    .w(px(1.))
+                    .h_full()
+                    .group_hover("sidebar-handle", |style| style.bg(rgb(theme::BORDER))),
+            )
     }
 
     /// Writes a change already made in memory. If it fails, the error shows in
@@ -821,7 +889,7 @@ impl Root {
             .flex()
             .flex_col()
             .gap_1()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(self.sidebar_width))
             .flex_shrink_0()
             .overflow_y_scroll()
             .child(
@@ -927,7 +995,12 @@ impl Root {
                 }
                 cx.notify();
             }))
-            .child(label_element(label, hovered, window))
+            .child(label_element(
+                label,
+                self.sidebar_width - ENTRY_CHROME,
+                hovered,
+                window,
+            ))
             .child(
                 div()
                     .w(px(COUNT_WIDTH))
@@ -1405,9 +1478,9 @@ fn now() -> i64 {
 
 /// A sidebar name in its fixed width. Cut with an ellipsis, or, while hovered
 /// and too long to fit, sliding back and forth so all of it can be read.
-fn label_element(label: String, hovered: bool, window: &Window) -> gpui::AnyElement {
-    let overflow = text_width(&label, window) - LABEL_WIDTH;
-    let frame = div().w(px(LABEL_WIDTH)).flex_shrink_0().overflow_hidden();
+fn label_element(label: String, width: f32, hovered: bool, window: &Window) -> gpui::AnyElement {
+    let overflow = text_width(&label, window) - width;
+    let frame = div().w(px(width)).flex_shrink_0().overflow_hidden();
     if !hovered || overflow <= 0. {
         return frame.truncate().child(label).into_any_element();
     }
@@ -1743,11 +1816,21 @@ impl Render for Root {
             .text_color(rgb(theme::TEXT))
             .child(
                 div()
+                    .id("columns")
                     .flex()
-                    .gap_4()
                     .flex_1()
                     .min_h(px(0.))
+                    .on_drag_move(cx.listener(
+                        |this, event: &gpui::DragMoveEvent<ResizeSidebar>, _window, cx| {
+                            this.resize_sidebar(event.event.position.x, event.bounds.left(), cx)
+                        },
+                    ))
+                    .on_drop(cx.listener(|this, _: &ResizeSidebar, _window, cx| {
+                        let width = this.sidebar_width;
+                        this.save(cx, move || folders::save_sidebar_width(width));
+                    }))
                     .child(self.sidebar(window, cx))
+                    .child(self.sidebar_handle())
                     .child(
                         div()
                             .flex()
