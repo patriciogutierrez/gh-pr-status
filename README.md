@@ -184,7 +184,9 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   falta es responder hilos de review), ver los logs de cada check fallido (menos docs-check) y
   sacarlo del grupo.
 - **Solicitar review** abre un formulario en una ventana aparte: reviewer (de la lista de
-  `GH_PR_STATUS_REVIEWERS`), urgencia (highest, high, medium, low), canal, comentario, y el
+  `GH_PR_STATUS_REVIEWERS`; al abrir la lista se puede escribir para filtrarla, sin importar
+  mayúsculas ni tildes, y enter elige la primera coincidencia), urgencia (highest, high,
+  medium, low), canal, comentario, y el
   link del PR ya puesto. «Enviar a Slack» (o enter) hace un `POST` al webhook del workflow de
   review del equipo, que publica el pedido con su botón «aprobar»; tú vas como requester. La
   fila dice «review pedido hace N» hasta que el PR quede aprobado, y el menú deja de ofrecer

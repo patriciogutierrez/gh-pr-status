@@ -4,8 +4,8 @@
 
 use gpui::{
     App, Bounds, Context, FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, SharedString, TitlebarOptions, WeakEntity, Window,
-    WindowBounds, WindowOptions, anchored, deferred, div, prelude::*, px, rgb, size,
+    MouseDownEvent, Render, SharedString, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    WindowOptions, deferred, div, prelude::*, px, rgb, size,
 };
 
 use crate::review::{self, Config, Request, URGENCIES};
@@ -43,8 +43,10 @@ pub struct ReviewView<R: Requester> {
     comment: String,
     sending: bool,
     error: Option<String>,
-    /// The choice whose options are open, and where the click was.
-    menu: Option<(Field, Point<Pixels>)>,
+    /// The choice whose options are open under its field.
+    menu: Option<Field>,
+    /// What was typed into the open choice, to filter its options.
+    query: String,
     focus_handle: FocusHandle,
 }
 
@@ -79,6 +81,7 @@ pub fn open<R: Requester>(
                 sending: false,
                 error: None,
                 menu: None,
+                query: String::new(),
                 focus_handle: cx.focus_handle(),
             });
             window.focus(&view.read(cx).focus_handle);
@@ -90,25 +93,69 @@ pub fn open<R: Requester>(
 }
 
 impl<R: Requester> ReviewView<R> {
-    /// Typing into the comment: enter sends, escape closes the window.
+    /// Typing goes to the open choice's filter when one is open (enter picks
+    /// the first match, escape closes it), else to the comment (enter sends,
+    /// escape closes the window).
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
-        match keystroke.key.as_str() {
-            "enter" if !self.sending => self.send(window, cx),
-            "escape" if !self.sending => window.remove_window(),
-            "backspace" => {
-                self.comment.pop();
-            }
+        let typed = match keystroke.key.as_str() {
+            "enter" | "escape" | "backspace" => None,
             _ if keystroke.modifiers.platform || keystroke.modifiers.control => return,
             _ => match &keystroke.key_char {
-                Some(typed) if !typed.chars().any(char::is_control) => {
-                    self.comment.push_str(typed);
-                }
+                Some(typed) if !typed.chars().any(char::is_control) => Some(typed.clone()),
                 _ => return,
             },
+        };
+        if let Some(field) = self.menu {
+            match (keystroke.key.as_str(), typed) {
+                ("enter", _) => {
+                    if let Some((index, _)) = self.matches(field).into_iter().next() {
+                        self.pick(field, index);
+                    }
+                    self.close_menu();
+                }
+                ("escape", _) => self.close_menu(),
+                ("backspace", _) => {
+                    self.query.pop();
+                }
+                (_, Some(typed)) => self.query.push_str(&typed),
+                _ => return,
+            }
+        } else {
+            match (keystroke.key.as_str(), typed) {
+                ("enter", _) if !self.sending => self.send(window, cx),
+                ("escape", _) if !self.sending => window.remove_window(),
+                ("backspace", _) => {
+                    self.comment.pop();
+                }
+                (_, Some(typed)) => self.comment.push_str(&typed),
+                _ => return,
+            }
         }
         cx.stop_propagation();
         cx.notify();
+    }
+
+    fn open_menu(&mut self, field: Field) {
+        self.menu = Some(field);
+        self.query.clear();
+    }
+
+    fn close_menu(&mut self) {
+        self.menu = None;
+        self.query.clear();
+    }
+
+    /// The options of `field` that the typed filter lets through, with their
+    /// indexes; every option when nothing is typed. Case and accents don't
+    /// count.
+    fn matches(&self, field: Field) -> Vec<(usize, String)> {
+        let wanted = review::plain(&self.query).to_lowercase();
+        self.options(field)
+            .into_iter()
+            .enumerate()
+            .filter(|(_, name)| review::plain(name).to_lowercase().contains(&wanted))
+            .collect()
     }
 
     /// Posts the request; the window closes once Slack accepts it, and the
@@ -209,13 +256,21 @@ impl<R: Requester> ReviewView<R> {
         }
     }
 
-    /// A labeled choice; clicking it lists the options under the click.
+    /// A labeled choice. Clicking it opens the options right under the
+    /// field; typing then filters them, and the field shows what is typed.
     fn choice(
         &self,
         label: &'static str,
         field: Field,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let open = self.menu == Some(field);
+        let shown = if open {
+            format!("{}▏", self.query)
+        } else {
+            self.name(field)
+        };
+
         div()
             .flex()
             .items_center()
@@ -229,81 +284,106 @@ impl<R: Requester> ReviewView<R> {
             )
             .child(
                 div()
-                    .id(SharedString::from(format!("choice-{label}")))
-                    .flex()
+                    .relative()
                     .flex_1()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(theme::SURFACE))
-                    .text_sm()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(theme::SURFACE)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                            this.menu = Some((field, event.position));
-                            cx.notify();
-                        }),
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("choice-{label}")))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(if open { theme::ACCENT } else { theme::SURFACE }))
+                            .text_sm()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(theme::SURFACE)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                                    if this.menu == Some(field) {
+                                        this.close_menu();
+                                    } else {
+                                        this.open_menu(field);
+                                    }
+                                    cx.notify();
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .truncate()
+                                    .when(open && self.query.is_empty(), |this| {
+                                        this.text_color(rgb(theme::MUTED))
+                                    })
+                                    .child(if open && self.query.is_empty() {
+                                        "Escribe para filtrar▏".to_string()
+                                    } else {
+                                        shown
+                                    }),
+                            )
+                            .child(div().text_xs().text_color(rgb(theme::MUTED)).child("▾")),
                     )
-                    .child(div().flex_1().truncate().child(self.name(field)))
-                    .child(div().text_xs().text_color(rgb(theme::MUTED)).child("▾")),
+                    .when(open, |this| this.child(self.options_list(field, cx))),
             )
     }
 
-    /// The open choice's options, drawn over the form at the click.
-    fn options_menu(
-        &self,
-        field: Field,
-        at: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let items = self
-            .options(field)
-            .into_iter()
-            .enumerate()
-            .map(|(index, name)| {
-                ui::menu_item(
-                    SharedString::from(format!("option-{index}")),
-                    name,
-                    cx.listener(move |this, _event, _window, cx| {
-                        this.pick(field, index);
-                        cx.notify();
-                    }),
-                )
-            })
-            .collect::<Vec<_>>();
+    /// The open choice's options that match what is typed, hanging under
+    /// its field and painted over whatever follows.
+    fn options_list(&self, field: Field, cx: &mut Context<Self>) -> impl IntoElement {
+        let matches = self.matches(field);
+        let items = if matches.is_empty() {
+            vec![
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_color(rgb(theme::MUTED))
+                    .child("Sin coincidencias")
+                    .into_any_element(),
+            ]
+        } else {
+            matches
+                .into_iter()
+                .map(|(index, name)| {
+                    ui::menu_item(
+                        SharedString::from(format!("option-{index}")),
+                        name,
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.pick(field, index);
+                            this.close_menu();
+                            cx.notify();
+                        }),
+                    )
+                })
+                .collect()
+        };
 
         deferred(
-            anchored().position(at).snap_to_window().child(
-                div()
-                    .id("options")
-                    .occlude()
-                    .flex()
-                    .flex_col()
-                    .p_1()
-                    .min_w(px(180.))
-                    .max_h(px(320.))
-                    .overflow_y_scroll()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(theme::BORDER))
-                    .bg(rgb(theme::SURFACE))
-                    .shadow_lg()
-                    .text_sm()
-                    .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                        this.menu = None;
-                        cx.notify();
-                    }))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.menu = None;
-                        cx.notify();
-                    }))
-                    .children(items),
-            ),
+            div()
+                .id("options")
+                .occlude()
+                .absolute()
+                .top(px(34.))
+                .left_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .p_1()
+                .max_h(px(220.))
+                .overflow_y_scroll()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(theme::BORDER))
+                .bg(rgb(theme::SURFACE))
+                .shadow_lg()
+                .text_sm()
+                .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                    this.close_menu();
+                    cx.notify();
+                }))
+                .children(items),
         )
         .with_priority(1)
     }
@@ -403,8 +483,5 @@ impl<R: Requester> Render for ReviewView<R> {
                         cx.listener(|this, _event, window, cx| this.send(window, cx)),
                     )),
             )
-            .when_some(self.menu, |this, (field, at)| {
-                this.child(self.options_menu(field, at, cx))
-            })
     }
 }
