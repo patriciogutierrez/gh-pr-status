@@ -440,8 +440,11 @@ impl<R: Requester> Render for ReviewView<R> {
                             .child("Comentario"),
                     )
                     .child(
+                        // `min_w(0)` keeps the box at the row's width, so long
+                        // text wraps instead of widening it.
                         div()
                             .flex_1()
+                            .min_w(px(0.))
                             .h_full()
                             .min_h(px(56.))
                             .px_2()
@@ -450,6 +453,7 @@ impl<R: Requester> Render for ReviewView<R> {
                             .border_1()
                             .border_color(rgb(theme::ACCENT))
                             .bg(rgb(theme::MANTLE))
+                            .overflow_hidden()
                             .text_sm()
                             .child(if self.comment.is_empty() {
                                 div().text_color(rgb(theme::MUTED)).child("Escribe aquí▏")
