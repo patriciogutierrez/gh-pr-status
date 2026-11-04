@@ -71,16 +71,39 @@ pub fn config() -> Option<Config> {
     (!config.reviewers.is_empty() && !config.channels.is_empty()).then_some(config)
 }
 
-/// `Name:ID,Name:ID`; entries without a colon are skipped.
+/// `Name:ID,Name:ID`, in alphabetical order and without accents; entries
+/// without a colon are skipped.
 fn parse_choices(list: &str) -> Vec<Choice> {
-    list.split(',')
+    let mut choices: Vec<Choice> = list
+        .split(',')
         .filter_map(|entry| {
             let (name, id) = entry.split_once(':')?;
-            let (name, id) = (name.trim(), id.trim());
+            let (name, id) = (plain(name.trim()), id.trim());
             (!name.is_empty() && !id.is_empty()).then(|| Choice {
-                name: name.to_string(),
+                name,
                 id: id.to_string(),
             })
+        })
+        .collect();
+    choices.sort_by_key(|choice| choice.name.to_lowercase());
+    choices
+}
+
+/// The name with its accents dropped: `Bastián` reads `Bastian`.
+fn plain(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'Á' | 'À' | 'Ä' => 'A',
+            'É' | 'È' | 'Ë' => 'E',
+            'Í' | 'Ì' | 'Ï' => 'I',
+            'Ó' | 'Ò' | 'Ö' => 'O',
+            'Ú' | 'Ù' | 'Ü' => 'U',
+            c => c,
         })
         .collect()
 }
@@ -174,19 +197,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn choices_come_as_name_colon_id_pairs() {
-        let choices = parse_choices("Pato:U1, Matute : U2,sin-id,:U3");
+    fn choices_come_as_name_colon_id_pairs_sorted_and_without_accents() {
+        let choices = parse_choices("Pato:U1, Matute : U2,sin-id,:U3,Bastián:U4");
 
         assert_eq!(
             choices,
             [
                 Choice {
-                    name: "Pato".to_string(),
-                    id: "U1".to_string()
+                    name: "Bastian".to_string(),
+                    id: "U4".to_string()
                 },
                 Choice {
                     name: "Matute".to_string(),
                     id: "U2".to_string()
+                },
+                Choice {
+                    name: "Pato".to_string(),
+                    id: "U1".to_string()
                 },
             ]
         );
