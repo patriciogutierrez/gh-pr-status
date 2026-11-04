@@ -2855,7 +2855,7 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some(SharedString::from("Pull requests")),
+                    title: Some(SharedString::from("PR Manager")),
                     ..Default::default()
                 }),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

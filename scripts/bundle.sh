@@ -12,9 +12,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-APP_NAME="GH PR Status"
+APP_NAME="PR Manager"
 BINARY="gh-pr-status"
-BUNDLE_ID="com.patriciogutierrez.gh-pr-status"
+BUNDLE_ID="com.patriciogutierrez.pr-manager"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 APP="$TARGET_DIR/release/bundle/$APP_NAME.app"
