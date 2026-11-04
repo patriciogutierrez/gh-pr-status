@@ -48,6 +48,7 @@ de deploy** (ver [El pipeline](#el-pipeline)):
 | `GH_PR_STATUS_GCP_PROD` | Proyecto de GCP de prod | `acme-prod` |
 | `GH_PR_STATUS_GCP_DEVELOPMENT` | Proyecto de GCP de development | `acme-dev` |
 | `GH_PR_STATUS_SLACK_CHANNEL` | ID del canal de Slack donde inicias tu workflow (por ejemplo, pedir review). Agrega un botón "Slack" al lado de cada PR | `C0123456789` |
+| `GH_PR_STATUS_CODE_DIR` | Dónde están clonados los repos que lee el agente de cada grupo. Por defecto, `~/code` | `~/code` |
 | `GH_PR_STATUS_SLACK_TEAM` | ID del workspace de Slack (`T…`, aparece en `app.slack.com/client/<id>/…`). Con él el canal se abre directo en la app de Slack; sin él pasa por el navegador | `T0123456789` |
 
 Los proyectos de GCP solo sirven para saber en qué ambiente falló un deploy cuando el
@@ -123,6 +124,29 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   cambiar su ancho, que se recuerda al reiniciar. Se guardan en
   `~/Library/Application Support/gh-pr-status/groups.sqlite`. El nombre se escribe sin un
   campo de texto nativo: los acentos con tecla muerta (´ + a) no se componen.
+- **Subgrupos**, un nivel bajo cada grupo: clic derecho sobre el grupo → «Nuevo subgrupo».
+  Al elegir el grupo ves sus PRs y los de todos sus subgrupos; al elegir un subgrupo, solo los
+  suyos. La flecha ▸/▾ a la izquierda de un grupo pliega sus subgrupos, y queda así al
+  reiniciar; un grupo plegado se marca como elegido cuando uno de sus subgrupos lo está.
+  Eliminar un grupo elimina también sus subgrupos. En «Mis PRs», un grupo con
+  subgrupos se ve como tablero: una columna por subgrupo (y «Sin subgrupo» primero, si el
+  grupo tiene PRs propios) con tarjetas compactas ordenadas por estado y sus mergeados
+  colapsados al final. Arrastra una tarjeta a otra columna para cambiarla de subgrupo. Las
+  columnas se desplazan hacia el lado con el trackpad o con la rueda; los botones Slack y
+  `/deploy` aparecen al pasar el mouse por la tarjeta.
+- **Un agente por grupo**, en [Orca](https://github.com/stablyai/orca). Con un grupo elegido,
+  el botón **Agente** (o clic derecho → «Abrir agente en Orca») abre una pestaña de Orca con
+  `claude --add-dir ~/code`, para conversar qué hay que hacer y en qué repos. La primera vez
+  crea la carpeta del grupo en `~/orca/groups/<grupo>/`, un repo git con un `CLAUDE.md` que
+  le explica al agente cómo trabajar, y la registra en Orca. Las siguientes vuelve a la misma
+  pestaña. El agente crea un worktree de Orca por repo, marcado con el grupo
+  (`--comment gh-pr-status:group=<id>`), y los PRs que salgan de esas ramas entran solos al
+  grupo. Si sacas uno a mano, no vuelve a entrar. Los subgrupos comparten el agente de su
+  grupo: la app mantiene en la carpeta del grupo un `subgrupos.md` con la marca de cada uno,
+  y el agente marca cada worktree con el subgrupo al que pertenece, así sus PRs caen ahí. Los repos se buscan en `~/code`, o en
+  `GH_PR_STATUS_CODE_DIR` si está definida. La primera vez, Claude Code pregunta si confías
+  en la carpeta del grupo. Al eliminar un grupo, su carpeta queda en disco y registrada en
+  Orca; sácala desde Orca.
 - Cada fila muestra repo, número, rama base y rama head, la última actualización, y
   badges de CI, review y conflictos. El de review dice quién aprobó o a quién se le pidió
   review. Si el CI falla, lista cada check fallido con el motivo (la primera anotación de
@@ -228,6 +252,7 @@ cargo clippy --all-targets
 | `src/github.rs` | La consulta GraphQL vía `gh`, el parseo de la respuesta y las fechas |
 | `src/pipeline.rs` | La configuración del bot y el parseo de sus comentarios: etapas, horas, errores y estado |
 | `src/folders.rs` | Los grupos de PRs y a cuál pertenece cada uno, en SQLite |
+| `src/orca.rs` | El agente de cada grupo en Orca y los worktrees marcados con su grupo |
 | `src/db.rs` | Dónde se abren los archivos SQLite locales |
 | `src/merged.rs` | Los PRs mergeados: la búsqueda en GitHub, el registro en SQLite y los días en hora local |
 | `src/notify.rs` | Detecta hitos de deploy y PRs aprobados, y manda la notificación de macOS |

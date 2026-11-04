@@ -3,7 +3,8 @@
 //! Two tabs: the PRs the user authored, grouped by what they are waiting on,
 //! and the user's merged PRs. Under each of the user's PRs sits the latest CI/CD run as the pipeline
 //! bot reports it. A sidebar holds the groups the user drags PRs into; picking
-//! one narrows every tab to it.
+//! one narrows every tab to it. Each group can open an agent in Orca, and the
+//! PRs from the worktrees that agent makes join the group on their own.
 //!
 //! The open PRs reload every minute; while one of the user's deploys is running,
 //! "Mis PRs" reloads every 20 seconds so the run can be followed live. macOS
@@ -15,6 +16,7 @@ mod folders;
 mod github;
 mod merged;
 mod notify;
+mod orca;
 mod pipeline;
 mod status;
 mod theme;
@@ -66,6 +68,12 @@ const HANDLE_WIDTH: f32 = 16.;
 /// leaves the rest of the sidebar's width to the name.
 const COUNT_WIDTH: f32 = 20.;
 const ENTRY_CHROME: f32 = 2. * 8. + 2. + 8. + COUNT_WIDTH;
+/// The room a group's fold arrow takes, with the gap after it.
+const FOLD_WIDTH: f32 = 12. + 8.;
+/// How far a subgroup sits in from its group, past the group's arrow.
+const SUBGROUP_INDENT: f32 = FOLD_WIDTH + 6.;
+/// How wide each column of a group's board is.
+const BOARD_COLUMN: f32 = 300.;
 /// A hovered name that doesn't fit waits `MARQUEE_WAIT`, slides left at
 /// `MARQUEE_SPEED` pixels a second until its end shows, holds `MARQUEE_HOLD`,
 /// slides back in `MARQUEE_RETURN`, and starts over.
@@ -136,9 +144,10 @@ struct Editor {
 
 enum Editing {
     /// A new group, which gets `pull` once created when it was started by
-    /// dropping that PR on "Nuevo grupo".
+    /// dropping that PR on "Nuevo grupo"; a subgroup of `parent` when it has one.
     New {
         pull: Option<String>,
+        parent: Option<i64>,
     },
     Rename(i64),
 }
@@ -290,6 +299,12 @@ struct Root {
     /// The sidebar entry under the mouse, whose name scrolls if it is cut.
     hovered: Option<Filter>,
     sidebar_width: f32,
+    /// The group whose agent is being opened in Orca.
+    opening_agent: Option<i64>,
+    /// The board card under the mouse, which shows its buttons.
+    hovered_card: Option<String>,
+    /// Board columns whose merged PRs are unfolded.
+    merged_open: HashSet<i64>,
     focus_handle: FocusHandle,
 }
 
@@ -309,6 +324,9 @@ impl Root {
             editor: None,
             hovered: None,
             sidebar_width: SIDEBAR_WIDTH,
+            opening_agent: None,
+            hovered_card: None,
+            merged_open: HashSet::new(),
             focus_handle: cx.focus_handle(),
         };
         root.start_clock(cx);
@@ -394,14 +412,18 @@ impl Root {
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let result = cx
+            let (result, worktrees) = cx
                 .background_executor()
-                .spawn(async move { github::fetch() })
+                .spawn(async move { (github::fetch(), orca::worktrees()) })
                 .await;
 
             this.update(cx, |this, cx| {
                 if let Ok(snapshot) = &result {
                     this.notify_changes(&snapshot.pulls, cx);
+                    // Without Orca there are no worktrees, and nothing to claim.
+                    if let Ok(worktrees) = worktrees {
+                        this.claim(&snapshot.pulls, &worktrees, cx);
+                    }
                 }
                 let feed = &mut this.mine;
                 feed.load = into_load(result);
@@ -423,6 +445,62 @@ impl Root {
                 .spawn(async move { notices.iter().for_each(notify::send) })
                 .detach();
         }
+    }
+
+    /// Puts each new PR from a group's worktree in that group.
+    fn claim(
+        &mut self,
+        pulls: &[PullRequest],
+        worktrees: &[orca::Worktree],
+        cx: &mut Context<Self>,
+    ) {
+        for (url, id) in orca::claims(pulls, worktrees, &self.folders) {
+            self.folders.by_url.insert(url.clone(), id);
+            self.folders.claimed.insert(url.clone());
+            self.save(cx, move || folders::claim(&url, id));
+        }
+    }
+
+    /// Opens the group's agent in Orca, or goes back to the one already open.
+    /// A subgroup opens its group's.
+    fn open_agent(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(folder) = self.folders.root(id).cloned() else {
+            return;
+        };
+        let subgroups = self.subgroups(folder.id);
+        if self.opening_agent.is_some() {
+            return;
+        }
+        self.opening_agent = Some(id);
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { orca::open_agent(&folder, &subgroups) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.opening_agent = None;
+                this.folders_error = result.err();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn subgroups(&self, id: i64) -> Vec<folders::Folder> {
+        self.folders.children(id).cloned().collect()
+    }
+
+    /// Tells the agent of `id`'s group about its subgroups as they are now.
+    fn sync_subgroups(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(folder) = self.folders.root(id).cloned() else {
+            return;
+        };
+        let subgroups = self.subgroups(folder.id);
+        self.save(cx, move || orca::sync_subgroups(&folder, &subgroups));
     }
 
     fn show(&mut self, tab: Tab, cx: &mut Context<Self>) {
@@ -541,7 +619,11 @@ impl Root {
         match self.filter {
             Filter::All => true,
             Filter::Loose => !self.folders.by_url.contains_key(url),
-            Filter::Folder(id) => self.folders.by_url.get(url) == Some(&id),
+            Filter::Folder(id) => self
+                .folders
+                .by_url
+                .get(url)
+                .is_some_and(|member| self.folders.includes(id, *member)),
         }
     }
 
@@ -563,7 +645,25 @@ impl Root {
         self.save(cx, move || folders::assign(&url, folder));
     }
 
+    /// Folds or unfolds the group's subgroups in the sidebar.
+    fn toggle_fold(&mut self, id: i64, cx: &mut Context<Self>) {
+        if !self.folders.collapsed.remove(&id) {
+            self.folders.collapsed.insert(id);
+        }
+        let collapsed = self.folders.collapsed.clone();
+        self.save(cx, move || folders::save_collapsed(&collapsed));
+        cx.notify();
+    }
+
     fn start_editing(&mut self, target: Editing, cx: &mut Context<Self>) {
+        if let Editing::New {
+            parent: Some(parent),
+            ..
+        } = target
+            && self.folders.collapsed.contains(&parent)
+        {
+            self.toggle_fold(parent, cx);
+        }
         let text = match &target {
             Editing::Rename(id) => self
                 .folders
@@ -620,12 +720,13 @@ impl Root {
                     folder.name = name.clone();
                 }
                 self.save(cx, move || folders::rename(id, &name));
+                self.sync_subgroups(id, cx);
             }
-            Editing::New { pull } => {
+            Editing::New { pull, parent } => {
                 cx.spawn(async move |this, cx| {
                     let result = cx
                         .background_executor()
-                        .spawn(async move { folders::create(&name) })
+                        .spawn(async move { folders::create(&name, parent) })
                         .await;
 
                     this.update(cx, |this, cx| {
@@ -633,6 +734,9 @@ impl Root {
                             Ok(folder) => {
                                 let id = folder.id;
                                 this.folders.list.push(folder);
+                                if parent.is_some() {
+                                    this.sync_subgroups(id, cx);
+                                }
                                 match pull {
                                     Some(url) => this.move_to(&url, Some(id), cx),
                                     None => this.filter = Filter::Folder(id),
@@ -649,14 +753,31 @@ impl Root {
         }
     }
 
-    /// Removes the group; its PRs go back to "Sin grupo".
+    /// Removes the group and its subgroups; their PRs go back to "Sin grupo".
     fn delete_folder(&mut self, id: i64, cx: &mut Context<Self>) {
-        self.folders.list.retain(|folder| folder.id != id);
-        self.folders.by_url.retain(|_, folder| *folder != id);
-        if self.filter == Filter::Folder(id) {
+        let parent = self.folders.get(id).and_then(|folder| folder.parent);
+        let gone: HashSet<i64> = self
+            .folders
+            .list
+            .iter()
+            .filter(|folder| self.folders.includes(id, folder.id))
+            .map(|folder| folder.id)
+            .collect();
+        self.folders
+            .list
+            .retain(|folder| !gone.contains(&folder.id));
+        self.folders
+            .by_url
+            .retain(|_, folder| !gone.contains(folder));
+        if let Filter::Folder(selected) = self.filter
+            && gone.contains(&selected)
+        {
             self.filter = Filter::All;
         }
         self.save(cx, move || folders::delete(id));
+        if let Some(parent) = parent {
+            self.sync_subgroups(parent, cx);
+        }
         cx.notify();
     }
 
@@ -773,20 +894,51 @@ impl Root {
             }
             MenuFor::Folder(id) => {
                 let id = *id;
-                vec![
-                    menu_item(
-                        "menu-rename",
-                        "Renombrar",
+                let subgroup = self
+                    .folders
+                    .get(id)
+                    .is_some_and(|folder| folder.parent.is_some());
+                let mut items = vec![menu_item(
+                    "menu-agent",
+                    if subgroup {
+                        "Abrir agente del grupo"
+                    } else {
+                        "Abrir agente en Orca"
+                    },
+                    cx.listener(move |this, _event, _window, cx| this.open_agent(id, cx)),
+                )];
+                if !subgroup {
+                    items.push(menu_item(
+                        "menu-subgroup",
+                        "Nuevo subgrupo",
                         cx.listener(move |this, _event, _window, cx| {
-                            this.start_editing(Editing::Rename(id), cx)
+                            this.start_editing(
+                                Editing::New {
+                                    pull: None,
+                                    parent: Some(id),
+                                },
+                                cx,
+                            )
                         }),
-                    ),
-                    menu_item(
-                        "menu-delete",
-                        "Eliminar grupo",
-                        cx.listener(move |this, _event, _window, cx| this.delete_folder(id, cx)),
-                    ),
-                ]
+                    ));
+                }
+                items.push(menu_item(
+                    "menu-rename",
+                    "Renombrar",
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.start_editing(Editing::Rename(id), cx)
+                    }),
+                ));
+                items.push(menu_item(
+                    "menu-delete",
+                    match (subgroup, self.folders.children(id).next().is_some()) {
+                        (true, _) => "Eliminar subgrupo",
+                        (false, true) => "Eliminar grupo y subgrupos",
+                        (false, false) => "Eliminar grupo",
+                    },
+                    cx.listener(move |this, _event, _window, cx| this.delete_folder(id, cx)),
+                ));
+                items
             }
         };
 
@@ -841,13 +993,19 @@ impl Root {
     }
 
     /// The groups down the left: everything, the PRs in no group, then each
-    /// group. A PR dropped on a group moves into it; dropped on "Sin grupo",
-    /// out of the one it was in; dropped on "Nuevo grupo", into a new one.
+    /// group with its subgroups under it. A PR dropped on a group moves into
+    /// it; dropped on "Sin grupo", out of the one it was in; dropped on "Nuevo
+    /// grupo", into a new one.
     fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let open = self.open_urls();
         let in_folder = |id: i64| {
             open.iter()
-                .filter(|url| self.folders.by_url.get(**url) == Some(&id))
+                .filter(|url| {
+                    self.folders
+                        .by_url
+                        .get(**url)
+                        .is_some_and(|member| self.folders.includes(id, *member))
+                })
                 .count()
         };
         let loose = open
@@ -861,28 +1019,47 @@ impl Root {
                 .map(|editor| editor.text.clone())
         };
 
-        let folders = self
+        let mut folders = Vec::new();
+        for root in self
             .folders
             .list
             .iter()
-            .map(|folder| {
+            .filter(|folder| folder.parent.is_none())
+        {
+            let folded = self.folders.collapsed.contains(&root.id);
+            let children = self.folders.children(root.id).filter(|_| !folded);
+            for folder in std::iter::once(root).chain(children) {
                 let id = folder.id;
-                match editing(&|target| matches!(target, Editing::Rename(other) if *other == id)) {
-                    Some(text) => self.name_field(text, cx).into_any_element(),
-                    None => self
-                        .sidebar_entry(
-                            folder.name.clone(),
-                            in_folder(id),
-                            Filter::Folder(id),
-                            window,
-                            cx,
-                        )
-                        .on_mouse_down(MouseButton::Right, self.open_menu(MenuFor::Folder(id), cx))
-                        .into_any_element(),
-                }
-            })
-            .collect::<Vec<_>>();
-        let new_name = editing(&|target| matches!(target, Editing::New { .. }));
+                let indented = folder.parent.is_some();
+                folders.push(
+                    match editing(
+                        &|target| matches!(target, Editing::Rename(other) if *other == id),
+                    ) {
+                        Some(text) => self.name_field(text, indented, cx).into_any_element(),
+                        None => self
+                            .sidebar_entry(
+                                folder.name.clone(),
+                                in_folder(id),
+                                Filter::Folder(id),
+                                window,
+                                cx,
+                            )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                self.open_menu(MenuFor::Folder(id), cx),
+                            )
+                            .into_any_element(),
+                    },
+                );
+            }
+            let parent = Some(root.id);
+            if let Some(text) = editing(
+                &|target| matches!(target, Editing::New { parent: other, .. } if *other == parent),
+            ) {
+                folders.push(self.name_field(text, true, cx).into_any_element());
+            }
+        }
+        let new_name = editing(&|target| matches!(target, Editing::New { parent: None, .. }));
 
         div()
             .id("sidebar")
@@ -911,7 +1088,7 @@ impl Root {
             .child(div().h(px(1.)).my_1().bg(rgb(theme::BORDER)))
             .children(folders)
             .child(match new_name {
-                Some(text) => self.name_field(text, cx).into_any_element(),
+                Some(text) => self.name_field(text, false, cx).into_any_element(),
                 None => div()
                     .id("folder-new")
                     .px_2()
@@ -925,13 +1102,20 @@ impl Root {
                     .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
                     .child("+ Nuevo grupo")
                     .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.start_editing(Editing::New { pull: None }, cx)
+                        this.start_editing(
+                            Editing::New {
+                                pull: None,
+                                parent: None,
+                            },
+                            cx,
+                        )
                     }))
                     .drag_over::<Dragged>(|style, _, _, _| drop_highlight(style))
                     .on_drop(cx.listener(|this, dragged: &Dragged, _window, cx| {
                         this.start_editing(
                             Editing::New {
                                 pull: Some(dragged.url.clone()),
+                                parent: None,
                             },
                             cx,
                         )
@@ -964,11 +1148,36 @@ impl Root {
             Filter::Loose => (SharedString::from("filter-loose"), None),
             Filter::Folder(id) => (SharedString::from(format!("folder-{id}")), Some(id)),
         };
-        let selected = self.filter == filter;
         let hovered = self.hovered == Some(filter);
+        let entry = folder.and_then(|id| self.folders.get(id));
+        let indent = match entry {
+            Some(folder) if folder.parent.is_some() => SUBGROUP_INDENT,
+            _ => 0.,
+        };
+        // A top-level group: `Some(folded)` when it has subgroups to fold.
+        let fold = entry
+            .filter(|folder| folder.parent.is_none())
+            .map(|folder| {
+                self.folders
+                    .children(folder.id)
+                    .next()
+                    .map(|_| self.folders.collapsed.contains(&folder.id))
+            });
+        // A folded group stands in for its selected subgroup.
+        let selected = self.filter == filter
+            || matches!(
+                (fold, self.filter, folder),
+                (Some(Some(true)), Filter::Folder(selected), Some(id))
+                    if self.folders.get(selected).and_then(|folder| folder.parent) == Some(id)
+            );
+        let label_width = self.sidebar_width
+            - ENTRY_CHROME
+            - indent
+            - if fold.is_some() { FOLD_WIDTH } else { 0. };
 
         div()
             .id(id)
+            .ml(px(indent))
             .flex()
             .gap_2()
             .items_center()
@@ -995,12 +1204,29 @@ impl Root {
                 }
                 cx.notify();
             }))
-            .child(label_element(
-                label,
-                self.sidebar_width - ENTRY_CHROME,
-                hovered,
-                window,
-            ))
+            .when_some(fold, |this, fold| {
+                this.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "fold-{}",
+                            folder.unwrap_or_default()
+                        )))
+                        .w(px(12.))
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(rgb(theme::MUTED))
+                        .when_some(fold, |this, folded| {
+                            let id = folder.unwrap_or_default();
+                            this.hover(|style| style.text_color(rgb(theme::TEXT)))
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_fold(id, cx)
+                                }))
+                                .child(if folded { "▸" } else { "▾" })
+                        }),
+                )
+            })
+            .child(label_element(label, label_width, hovered, window))
             .child(
                 div()
                     .w(px(COUNT_WIDTH))
@@ -1020,8 +1246,9 @@ impl Root {
     }
 
     /// The group name being typed, with a caret. Clicking elsewhere saves it.
-    fn name_field(&self, text: String, cx: &mut Context<Self>) -> impl IntoElement {
+    fn name_field(&self, text: String, indented: bool, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .when(indented, |this| this.ml(px(SUBGROUP_INDENT)))
             .px_2()
             .py_1()
             .rounded_md()
@@ -1068,6 +1295,21 @@ impl Root {
                     .text_color(rgb(theme::MUTED))
                     .child(caption),
             )
+            .when_some(
+                match self.filter {
+                    Filter::Folder(id) => Some(id),
+                    _ => None,
+                },
+                |this, id| {
+                    let opening = self.opening_agent.is_some();
+                    this.child(ui::button(
+                        "agent",
+                        if opening { "Abriendo…" } else { "Agente" },
+                        !opening,
+                        cx.listener(move |this, _event, _window, cx| this.open_agent(id, cx)),
+                    ))
+                },
+            )
             .child(ui::button(
                 "refresh",
                 if self.refreshing() {
@@ -1112,6 +1354,9 @@ impl Root {
             Load::Loading => message("Cargando…", theme::SUBTEXT).into_any_element(),
             Load::Failed(error) => message(error.clone(), theme::RED).into_any_element(),
             Load::Loaded(snapshot) => {
+                if let Some(group) = self.board_group() {
+                    return self.board(group, &snapshot.pulls, cx).into_any_element();
+                }
                 let pulls = self.visible(&snapshot.pulls);
                 let merged = self.folder_merged();
                 if pulls.is_empty() && merged.is_empty() {
@@ -1203,6 +1448,288 @@ impl Root {
                     })),
             )
             .child(list("mine").children(sections))
+    }
+
+    /// The selected group when "Mis PRs" shows it as a board: a top-level
+    /// group with subgroups.
+    fn board_group(&self) -> Option<i64> {
+        match self.filter {
+            Filter::Folder(id)
+                if self
+                    .folders
+                    .get(id)
+                    .is_some_and(|folder| folder.parent.is_none())
+                    && self.folders.children(id).next().is_some() =>
+            {
+                Some(id)
+            }
+            _ => None,
+        }
+    }
+
+    /// A group with subgroups: the counts for all of it, then one column per
+    /// subgroup, led by one for the PRs in the group itself when it has any.
+    /// The columns scroll sideways when they don't fit.
+    fn board(&self, id: i64, pulls: &[PullRequest], cx: &mut Context<Self>) -> impl IntoElement {
+        let now = now();
+        let visible = self.visible(pulls);
+        let merged = self.merged.pulls.as_deref().unwrap_or_default();
+        let in_column = |column: i64| {
+            let open: Vec<_> = visible
+                .iter()
+                .copied()
+                .filter(|pull| self.folders.by_url.get(&pull.url) == Some(&column))
+                .collect();
+            let shipped: Vec<_> = merged
+                .iter()
+                .filter(|pull| self.folders.by_url.get(&pull.url) == Some(&column))
+                .collect();
+            (open, shipped)
+        };
+
+        let mut columns = Vec::new();
+        let (open, shipped) = in_column(id);
+        if !open.is_empty() || !shipped.is_empty() {
+            columns.push(
+                self.board_column(id, &open, &shipped, cx)
+                    .into_any_element(),
+            );
+        }
+        for subgroup in self.folders.children(id) {
+            let (open, shipped) = in_column(subgroup.id);
+            columns.push(
+                self.board_column(subgroup.id, &open, &shipped, cx)
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .flex_1()
+            .min_h(px(0.))
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .text_xs()
+                    .children(Group::ALL.map(|group| {
+                        let count = visible
+                            .iter()
+                            .filter(|pull| Group::of(pull, now) == group)
+                            .count();
+                        div()
+                            .text_color(rgb(if count == 0 {
+                                theme::MUTED
+                            } else {
+                                group.color()
+                            }))
+                            .child(format!("{count} {}", group.short()))
+                    })),
+            )
+            .child(
+                div()
+                    .id("board")
+                    .flex()
+                    .gap_3()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_x_scroll()
+                    .children(columns),
+            )
+    }
+
+    /// One column of the board, for a subgroup or, as "Sin subgrupo", for the
+    /// PRs in the group itself: its name and count, its PRs by what they wait
+    /// on, and its merged PRs folded at the bottom. A PR dropped on it moves
+    /// into its group; a right click on the name opens the group's menu.
+    fn board_column(
+        &self,
+        id: i64,
+        open: &[&PullRequest],
+        shipped: &[&merged::Merged],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let now = now();
+        let name = match self.folders.get(id) {
+            Some(folder) if folder.parent.is_some() => folder.name.clone(),
+            _ => "Sin subgrupo".to_string(),
+        };
+        let mut cards: Vec<_> = Group::ALL
+            .into_iter()
+            .flat_map(|group| {
+                open.iter()
+                    .copied()
+                    .filter(move |pull| Group::of(pull, now) == group)
+                    .map(move |pull| (group, pull))
+            })
+            .map(|(group, pull)| self.card(pull, group.color(), cx).into_any_element())
+            .collect();
+        if cards.is_empty() {
+            cards.push(
+                div()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_dashed()
+                    .border_color(rgb(theme::BORDER))
+                    .text_xs()
+                    .text_color(rgb(theme::MUTED))
+                    .child("Sin PRs abiertos. Arrastra uno aquí.")
+                    .into_any_element(),
+            );
+        }
+        let unfolded = self.merged_open.contains(&id);
+
+        div()
+            .id(SharedString::from(format!("column-{id}")))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w(px(BOARD_COLUMN))
+            .flex_shrink_0()
+            .p_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(theme::BASE))
+            .bg(rgb(theme::MANTLE))
+            .drag_over::<Dragged>(|style, _, _, _| drop_highlight(style))
+            .on_drop(cx.listener(move |this, dragged: &Dragged, _window, cx| {
+                this.move_to(&dragged.url, Some(id), cx)
+            }))
+            .child(
+                div()
+                    .id(SharedString::from(format!("column-name-{id}")))
+                    .flex()
+                    .gap_2()
+                    .items_center()
+                    .px_1()
+                    .text_sm()
+                    .text_color(rgb(theme::SUBTEXT))
+                    .on_mouse_down(MouseButton::Right, self.open_menu(MenuFor::Folder(id), cx))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(name))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme::MUTED))
+                            .child(open.len().to_string()),
+                    ),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("column-cards-{id}")))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .children(cards)
+                    .when(!shipped.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .id(SharedString::from(format!("column-merged-{id}")))
+                                .px_1()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(theme::ACCENT))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    if !this.merged_open.remove(&id) {
+                                        this.merged_open.insert(id);
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(format!(
+                                    "{} {} mergeado{}",
+                                    if unfolded { "▾" } else { "▸" },
+                                    shipped.len(),
+                                    if shipped.len() == 1 { "" } else { "s" }
+                                )),
+                        )
+                        .when(unfolded, |this| {
+                            this.children(
+                                shipped
+                                    .iter()
+                                    .map(|pull| self.merged_row(pull, true, cx).into_any_element()),
+                            )
+                        })
+                    }),
+            )
+    }
+
+    /// A PR on the board: the row's content packed for a narrow column. Its
+    /// buttons show while the mouse is over it, or while a `/deploy` is going.
+    fn card(&self, pull: &PullRequest, stripe: u32, cx: &mut Context<Self>) -> impl IntoElement {
+        let expanded = self.expanded.contains(&pull.url);
+        let url = pull.url.clone();
+        let show_actions = self.hovered_card.as_deref() == Some(pull.url.as_str())
+            || self.deploys.contains_key(&pull.url);
+
+        div()
+            .id(SharedString::from(format!("card-{}", pull.url)))
+            .on_drag(
+                Dragged {
+                    url: pull.url.clone(),
+                    title: pull.title.clone().into(),
+                },
+                drag_preview,
+            )
+            .on_hover(cx.listener(move |this, hovering: &bool, _window, cx| {
+                if *hovering {
+                    this.hovered_card = Some(url.clone());
+                } else if this.hovered_card.as_deref() == Some(url.as_str()) {
+                    this.hovered_card = None;
+                }
+                cx.notify();
+            }))
+            .flex()
+            .gap_2()
+            .p_2()
+            .rounded_lg()
+            .bg(rgb(theme::SURFACE))
+            .child(div().w(px(3.)).flex_shrink_0().rounded_sm().bg(rgb(stripe)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(
+                        div()
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                self.open_menu(MenuFor::Pull(pull.url.clone()), cx),
+                            )
+                            .child(card_summary(pull)),
+                    )
+                    .when(!pull.failing_checks.is_empty(), |this| {
+                        this.child(failures(pull))
+                    })
+                    .when_some(
+                        match self.deploys.get(&pull.url) {
+                            Some(Deploy::Failed(error)) => Some(error.clone()),
+                            _ => None,
+                        },
+                        |this, error| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme::RED))
+                                    .child(format!("No se pudo enviar /deploy: {error}")),
+                            )
+                        },
+                    )
+                    .when_some(pull.pipeline.as_ref(), |this, run| {
+                        this.child(self.pipeline_bar(pull, run, expanded, cx))
+                            .when(expanded, |this| this.child(steps(pull, run)))
+                    })
+                    .when(show_actions, |this| this.child(self.actions(pull, cx))),
+            )
     }
 
     /// The user's merged PRs, one section per local day, newest first.
@@ -1651,6 +2178,63 @@ fn summary(pull: &PullRequest) -> impl IntoElement {
                 .text_sm()
                 .text_color(rgb(theme::TEXT))
                 .truncate()
+                .child(pull.title.clone()),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .items_center()
+                .children(
+                    status::badges(pull)
+                        .into_iter()
+                        .map(|badge| ui::badge(badge.label, badge.color)),
+                )
+                .when(pull.comments > 0, |this| {
+                    this.child(ui::badge(format!("💬 {}", pull.comments), theme::SUBTEXT))
+                }),
+        )
+}
+
+/// A board card's top: repo, number and age, the title in up to two lines,
+/// and the badges. Clicking it opens the PR on GitHub.
+fn card_summary(pull: &PullRequest) -> impl IntoElement {
+    let url = pull.url.clone();
+
+    div()
+        .id(SharedString::from(format!("open-{}", pull.url)))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_1()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+        .active(|style| style.bg(rgb(theme::SURFACE_ACTIVE)))
+        .on_click(move |_event, _window, cx| cx.open_url(&url))
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .text_xs()
+                .text_color(rgb(theme::MUTED))
+                .child(div().flex_1().min_w(px(0.)).truncate().child(format!(
+                    "{} #{}",
+                    pull.repo_name(),
+                    pull.number
+                )))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .child(status::ago(now() - pull.updated_at)),
+                ),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(theme::TEXT))
+                .line_clamp(2)
                 .child(pull.title.clone()),
         )
         .child(
