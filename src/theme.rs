@@ -2,6 +2,8 @@
 
 pub const BASE: u32 = 0x1e1e2e;
 pub const MANTLE: u32 = 0x181825;
+/// The row under the mouse: a step up from the base, under the surfaces.
+pub const ROW_HOVER: u32 = 0x25253a;
 pub const SURFACE: u32 = 0x313244;
 pub const SURFACE_HOVER: u32 = 0x45475a;
 pub const SURFACE_ACTIVE: u32 = 0x585b70;

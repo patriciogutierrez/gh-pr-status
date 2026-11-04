@@ -10,11 +10,9 @@ notificaciones de macOS cuando un deploy avanza o falla y cuando te aprueban un 
 │ [Mis PRs (5)] [Mergeadas]   actualizado…     [Actua]│
 │ 2 atención  1 listos  2 esperando  0 borradores      │
 │ NECESITAN TU ATENCIÓN 2                              │
-│ ▌ payments #539 · master ← feat/…  hace 2 h [/deploy]│
-│ ▌ Registrar la redirección del formulario…           │
-│ ▌ [✗ CI] [Aprobado por @ana] [💬 2]                  │
-│ ▌ ✗ tests   AssertionError: expected 2               │
-│ ▌ ▸ [✗ Deploy falló] [pre-prod ✗] 🚨 Falló el read…  │
+│ ● Registrar la redirección del formulario…        ⋯ │
+│   (Arreglar CI: tests) payments #539 · Aprobado … 2 h│
+│   ▸ [✗ Deploy falló] [pre-prod ✗] 🚨 Falló el read…  │
 │ LISTOS PARA MERGE 1                                  │
 │ ▌ …                                                  │
 └──────────────────────────────────────────────────────┘
@@ -47,7 +45,7 @@ de deploy** (ver [El pipeline](#el-pipeline)):
 | `GH_PR_STATUS_GCP_PREPROD` | Proyecto de GCP del ambiente pre-prod, tal como aparece en el link a los logs (`…?project=<id>`) | `acme-staging` |
 | `GH_PR_STATUS_GCP_PROD` | Proyecto de GCP de prod | `acme-prod` |
 | `GH_PR_STATUS_GCP_DEVELOPMENT` | Proyecto de GCP de development | `acme-dev` |
-| `GH_PR_STATUS_SLACK_CHANNEL` | ID del canal de Slack donde inicias tu workflow (por ejemplo, pedir review). Agrega un botón "Slack" al lado de cada PR | `C0123456789` |
+| `GH_PR_STATUS_SLACK_CHANNEL` | ID del canal de Slack donde inicias tu workflow (por ejemplo, pedir review). Agrega «Pedir review en Slack» al menú de cada PR | `C0123456789` |
 | `GH_PR_STATUS_CODE_DIR` | Dónde están clonados los repos que lee el agente de cada grupo. Por defecto, `~/code` | `~/code` |
 | `GH_PR_STATUS_SLACK_TEAM` | ID del workspace de Slack (`T…`, aparece en `app.slack.com/client/<id>/…`). Con él el canal se abre directo en la app de Slack; sin él pasa por el navegador | `T0123456789` |
 
@@ -132,8 +130,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   subgrupos se ve como tablero: una columna por subgrupo (y «Sin subgrupo» primero, si el
   grupo tiene PRs propios) con tarjetas compactas ordenadas por estado y sus mergeados
   colapsados al final. Arrastra una tarjeta a otra columna para cambiarla de subgrupo. Las
-  columnas se desplazan hacia el lado con el trackpad o con la rueda; los botones Slack y
-  `/deploy` aparecen al pasar el mouse por la tarjeta.
+  columnas se desplazan hacia el lado con el trackpad o con la rueda.
 - **Un agente por grupo**, en [Orca](https://github.com/stablyai/orca). Con un grupo elegido,
   el botón **Agente** (o clic derecho → «Abrir agente en Orca») abre una pestaña de Orca con
   `claude --add-dir ~/code`, para conversar qué hay que hacer y en qué repos. La primera vez
@@ -149,10 +146,11 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   Orca; sácala desde Orca.
 - Cada fila lleva en color su **siguiente acción**: lo primero que la traba (deploy fallido,
   conflictos, CI roja, cambios pedidos), si no lo que espera (CI, review de alguien, GitHub) y
-  si no «Mergear». Cuando es algo que un agente puede hacer, el botón **Pedir al agente** abre
-  el agente del grupo del PR y le escribe la tarea con el PR, la rama, los checks fallidos y
-  sus logs, y cómo ubicar o crear el worktree. El PR tiene que estar en un grupo; si el agente
-  recién abrió y pregunta si confías en la carpeta, hay que responderle en Orca y pedir de nuevo.
+  si no «Mergear». Es el único rótulo con color de la fila. Cuando es algo que un agente puede
+  hacer, el menú del PR ofrece **Pedir al agente**: abre el agente del grupo del PR y le
+  escribe la tarea con el PR, la rama, los checks fallidos y sus logs, y cómo ubicar o crear el
+  worktree. El PR tiene que estar en un grupo; si el agente recién abrió y pregunta si confías
+  en la carpeta, hay que responderle en Orca y pedir de nuevo.
 - **Stacks**: si la base de un PR es la rama de otro PR tuyo abierto, la fila muestra la
   cadena completa (`master ← #7684 ← [#7685]`) y la siguiente acción pasa a «Esperando el
   merge de #7684»; solo el de abajo dice «Mergear». Cuando GitHub re-apunta un PR a otra base
@@ -160,23 +158,25 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
 - **Gemelas [MASTER]/[DEV]**: un PR con el mismo título bajo el otro prefijo, en el mismo
   repo, aparece en la fila como «Gemela [DEV] #N» con su CI y review. Solo entre PRs abiertos:
   una gemela cerrada sin mergear no se ve.
-- Cada fila muestra repo, número, rama base y rama head, la última actualización, y
-  badges de CI, review y conflictos. El de review dice quién aprobó o a quién se le pidió
-  review. Si el CI falla, lista cada check fallido con el motivo (la primera anotación de
-  error que no sea el código de salida) y el clic en el check abre sus logs.
+- Cada fila es el título del PR, con un punto del color de su sección, y debajo la acción
+  seguida de una línea gris con repo y número, CI, review (quién aprobó o a quién se le
+  pidió), conflictos, comentarios, la rama y hace cuánto se actualizó. Si el CI falla, el
+  nombre del check va en la acción y sus logs en el menú del PR.
 - Si configuraste el bot, debajo de cada PR tuyo está su **último pipeline**: estado
   (desplegando, desplegado, falló, sin avances), la etapa actual o el primer error, y hace
   cuánto escribió el bot. **Clic en el pipeline** lo despliega: últimas 8 etapas con su
   hora, todos los errores (servicio y causa) y un botón para abrir el comentario.
-- **Clic en el PR** lo abre en el navegador.
-- **Clic derecho en el PR** abre un menú para copiar su URL.
-- Con `GH_PR_STATUS_SLACK_CHANNEL` definida, el botón **Slack** al lado de cada PR tuyo copia
-  el link del PR y abre ese canal en Slack. Los workflows de Slack solo se inician desde dentro
-  de Slack, así que desde ahí lo inicias (marcador del canal o menú `+`) y pegas el link. El
-  botón desaparece cuando el PR queda aprobado.
-- El botón **/deploy** comenta `/deploy` en el PR, como tu usuario de `gh`, para iniciar el
-  pipeline. Pide un segundo clic de confirmación (dentro de 5 s) y no aparece en borradores
-  ni mientras hay un deploy en curso.
+- **Clic en el título** abre el PR en el navegador.
+- **El menú del PR**, con el «⋯» que aparece al pasar el mouse o con clic derecho, reúne sus
+  acciones: pedir al agente, pedir review en Slack, comentar `/deploy`, ver los logs de cada
+  check fallido, copiar la URL y sacarlo del grupo.
+- Con `GH_PR_STATUS_SLACK_CHANNEL` definida, **Pedir review en Slack** copia el link del PR
+  y abre ese canal en Slack. Los workflows de Slack solo se inician desde dentro de Slack, así
+  que desde ahí lo inicias (marcador del canal o menú `+`) y pegas el link. Desaparece cuando
+  el PR queda aprobado.
+- **Comentar /deploy** comenta `/deploy` en el PR, como tu usuario de `gh`, para iniciar el
+  pipeline. Pide un segundo clic de confirmación (dentro de 5 s; el menú se queda abierto) y
+  no aparece en borradores ni mientras hay un deploy en curso.
 - Las listas se recargan solas cada minuto; mientras alguno de tus PRs está desplegando,
   "Mis PRs" se recarga cada 20 s.
 
@@ -272,7 +272,7 @@ cargo clippy --all-targets
 | `src/tool.rs` | Encuentra `gh` y los notificadores aunque la app no herede el `PATH` del shell |
 | `src/stack.rs` | Stacks de PRs (base sobre la rama de otro) y gemelas [MASTER]/[DEV] |
 | `src/status.rs` | En qué grupo cae un PR, sus badges y el "hace N min" |
-| `src/ui.rs` | Botones, pestañas y badges compartidos |
+| `src/ui.rs` | Botones, pestañas, el pill de la acción y los badges del pipeline |
 | `src/theme.rs` | Colores (Catppuccin Mocha) |
 | `scripts/bundle.sh` | Compila en release y arma el `.app` |
 
