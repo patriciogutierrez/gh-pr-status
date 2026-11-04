@@ -1005,7 +1005,12 @@ impl Root {
                     cx.listener(move |this, _event, _window, cx| this.ask_agent(&asked, cx)),
                 ));
             }
-            let wants_review = mine && !pull.draft && pull.review != Review::Approved;
+            // Once asked for, the review is on its way: the item goes until the
+            // app restarts.
+            let wants_review = mine
+                && !pull.draft
+                && pull.review != Review::Approved
+                && !self.review_asked.contains_key(url);
             if wants_review && review::config().is_some() {
                 let asked = url.to_string();
                 items.push(ui::menu_item(
