@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::review::{self, Config, Request, URGENCIES};
+use crate::text_input::TextInput;
 use crate::{theme, ui};
 
 /// The window's size: enough for the fields and a short comment.
@@ -40,7 +41,7 @@ pub struct ReviewView<R: Requester> {
     reviewer: Option<usize>,
     urgency: usize,
     channel: usize,
-    comment: String,
+    comment: gpui::Entity<TextInput>,
     sending: bool,
     error: Option<String>,
     /// The choice whose options are open under its field.
@@ -69,6 +70,8 @@ pub fn open<R: Requester>(
             ..Default::default()
         },
         |window, cx| {
+            let comment = cx.new(|cx| TextInput::new("Escribe aquí", cx));
+            let typing = comment.read(cx).focus_handle(cx);
             let view = cx.new(|cx| ReviewView {
                 root,
                 config,
@@ -77,14 +80,14 @@ pub fn open<R: Requester>(
                 reviewer: None,
                 urgency: 1,
                 channel: 0,
-                comment: String::new(),
+                comment,
                 sending: false,
                 error: None,
                 menu: None,
                 query: String::new(),
                 focus_handle: cx.focus_handle(),
             });
-            window.focus(&view.read(cx).focus_handle);
+            window.focus(&typing);
             view
         },
     )
@@ -94,41 +97,34 @@ pub fn open<R: Requester>(
 
 impl<R: Requester> ReviewView<R> {
     /// Typing goes to the open choice's filter when one is open (enter picks
-    /// the first match, escape closes it), else to the comment (enter sends,
-    /// escape closes the window).
+    /// the first match, escape closes it). Otherwise the comment field has
+    /// the keys, and only enter (send) and escape (close) are taken here.
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
-        let typed = match keystroke.key.as_str() {
-            "enter" | "escape" | "backspace" => None,
-            _ if keystroke.modifiers.platform || keystroke.modifiers.control => return,
-            _ => match &keystroke.key_char {
-                Some(typed) if !typed.chars().any(char::is_control) => Some(typed.clone()),
-                _ => return,
-            },
-        };
         if let Some(field) = self.menu {
-            match (keystroke.key.as_str(), typed) {
-                ("enter", _) => {
+            match keystroke.key.as_str() {
+                "enter" => {
                     if let Some((index, _)) = self.matches(field).into_iter().next() {
                         self.pick(field, index);
                     }
-                    self.close_menu();
+                    self.close_menu(window, cx);
                 }
-                ("escape", _) => self.close_menu(),
-                ("backspace", _) => {
+                "escape" => self.close_menu(window, cx),
+                "backspace" => {
                     self.query.pop();
                 }
-                (_, Some(typed)) => self.query.push_str(&typed),
-                _ => return,
+                _ if keystroke.modifiers.platform || keystroke.modifiers.control => return,
+                _ => match &keystroke.key_char {
+                    Some(typed) if !typed.chars().any(char::is_control) => {
+                        self.query.push_str(typed)
+                    }
+                    _ => return,
+                },
             }
         } else {
-            match (keystroke.key.as_str(), typed) {
-                ("enter", _) if !self.sending => self.send(window, cx),
-                ("escape", _) if !self.sending => window.remove_window(),
-                ("backspace", _) => {
-                    self.comment.pop();
-                }
-                (_, Some(typed)) => self.comment.push_str(&typed),
+            match keystroke.key.as_str() {
+                "enter" if !self.sending => self.send(window, cx),
+                "escape" if !self.sending => window.remove_window(),
                 _ => return,
             }
         }
@@ -136,14 +132,18 @@ impl<R: Requester> ReviewView<R> {
         cx.notify();
     }
 
-    fn open_menu(&mut self, field: Field) {
+    /// While a list is open the window itself takes focus, so what is typed
+    /// filters the list instead of landing in the comment.
+    fn open_menu(&mut self, field: Field, window: &mut Window) {
         self.menu = Some(field);
         self.query.clear();
+        window.focus(&self.focus_handle);
     }
 
-    fn close_menu(&mut self) {
+    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         self.query.clear();
+        window.focus(&self.comment.read(cx).focus_handle(cx));
     }
 
     /// The options of `field` that the typed filter lets through, with their
@@ -174,7 +174,7 @@ impl<R: Requester> ReviewView<R> {
             reviewer: reviewer.id.clone(),
             channel: channel.id.clone(),
             urgency: URGENCIES[self.urgency].1.to_string(),
-            comment: self.comment.trim().to_string(),
+            comment: self.comment.read(cx).text().trim().to_string(),
             pr_url: self.url.clone(),
         };
         let config = self.config.clone();
@@ -302,11 +302,11 @@ impl<R: Requester> ReviewView<R> {
                             .hover(|style| style.bg(rgb(theme::SURFACE)))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                                cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
                                     if this.menu == Some(field) {
-                                        this.close_menu();
+                                        this.close_menu(window, cx);
                                     } else {
-                                        this.open_menu(field);
+                                        this.open_menu(field, window);
                                     }
                                     cx.notify();
                                 }),
@@ -350,9 +350,9 @@ impl<R: Requester> ReviewView<R> {
                     ui::menu_item(
                         SharedString::from(format!("option-{index}")),
                         name,
-                        cx.listener(move |this, _event, _window, cx| {
+                        cx.listener(move |this, _event, window, cx| {
                             this.pick(field, index);
-                            this.close_menu();
+                            this.close_menu(window, cx);
                             cx.notify();
                         }),
                     )
@@ -379,8 +379,8 @@ impl<R: Requester> ReviewView<R> {
                 .bg(rgb(theme::SURFACE))
                 .shadow_lg()
                 .text_sm()
-                .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
-                    this.close_menu();
+                .on_mouse_down_out(cx.listener(|this, _event, window, cx| {
+                    this.close_menu(window, cx);
                     cx.notify();
                 }))
                 .children(items),
@@ -455,11 +455,7 @@ impl<R: Requester> Render for ReviewView<R> {
                             .bg(rgb(theme::MANTLE))
                             .overflow_hidden()
                             .text_sm()
-                            .child(if self.comment.is_empty() {
-                                div().text_color(rgb(theme::MUTED)).child("Escribe aquí▏")
-                            } else {
-                                div().child(format!("{}▏", self.comment))
-                            }),
+                            .child(self.comment.clone()),
                     ),
             )
             .when_some(self.error.clone(), |this, error| {

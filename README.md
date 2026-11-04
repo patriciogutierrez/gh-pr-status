@@ -197,7 +197,9 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   nueva llega como notificación de macOS. Sin token, «Ver pedido en Slack» abre el canal. Necesita `GH_PR_STATUS_REVIEW_WEBHOOK`, `GH_PR_STATUS_SLACK_USER`,
   `GH_PR_STATUS_REVIEWERS` y `GH_PR_STATUS_REVIEW_CHANNELS`; sin ellas, y con
   `GH_PR_STATUS_SLACK_CHANNEL`, el menú vuelve a copiar el link y abrir el canal. El
-  comentario se escribe sin campo nativo: los acentos con tecla muerta no se componen.
+  comentario es un campo de texto de verdad: cursor, selección con shift+flechas, cmd+flechas
+  para ir a los extremos, cmd+delete borra hasta el inicio, copiar y pegar, y los acentos se
+  componen.
 - **Deploy** comenta `/deploy` en el PR, como tu usuario de `gh`, para iniciar el
   pipeline. Antes pregunta en el diálogo del sistema (enter confirma, escape cancela), y no
   aparece en borradores ni mientras hay un deploy en curso.
@@ -296,6 +298,7 @@ cargo clippy --all-targets
 | `src/tool.rs` | Encuentra `gh` y los notificadores aunque la app no herede el `PATH` del shell |
 | `src/review.rs` | El pedido de review por el webhook del workflow de Slack y su configuración |
 | `src/review_view.rs` | La ventana del formulario de review |
+| `src/text_input.rs` | El campo de texto con cursor, selección e IME, adaptado del ejemplo de GPUI |
 | `src/slack.rs` | Lectura de Slack con el token de usuario: el mensaje del pedido y sus respuestas |
 | `src/stack.rs` | Stacks de PRs (base sobre la rama de otro) y gemelas [MASTER]/[DEV] |
 | `src/status.rs` | En qué grupo cae un PR, sus badges y el "hace N min" |
