@@ -35,7 +35,8 @@ pub struct ReviewView<R: Requester> {
     config: Config,
     url: String,
     title: String,
-    reviewer: usize,
+    /// Nobody until the user picks someone.
+    reviewer: Option<usize>,
     urgency: usize,
     channel: usize,
     comment: String,
@@ -70,7 +71,7 @@ pub fn open<R: Requester>(
                 config,
                 url,
                 title,
-                reviewer: 0,
+                reviewer: None,
                 urgency: 1,
                 channel: 0,
                 comment: String::new(),
@@ -113,9 +114,12 @@ impl<R: Requester> ReviewView<R> {
     /// main window hears which PR it was for.
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(reviewer), Some(channel)) = (
-            self.config.reviewers.get(self.reviewer),
+            self.reviewer
+                .and_then(|index| self.config.reviewers.get(index)),
             self.config.channels.get(self.channel),
         ) else {
+            self.error = Some("Elige a quién pedirle el review.".to_string());
+            cx.notify();
             return;
         };
         let request = Request {
@@ -158,11 +162,10 @@ impl<R: Requester> ReviewView<R> {
     fn name(&self, field: Field) -> String {
         match field {
             Field::Reviewer => self
-                .config
-                .reviewers
-                .get(self.reviewer)
+                .reviewer
+                .and_then(|index| self.config.reviewers.get(index))
                 .map(|c| c.name.clone())
-                .unwrap_or_default(),
+                .unwrap_or_else(|| "Elige…".to_string()),
             Field::Channel => self
                 .config
                 .channels
@@ -193,7 +196,7 @@ impl<R: Requester> ReviewView<R> {
 
     fn pick(&mut self, field: Field, index: usize) {
         match field {
-            Field::Reviewer => self.reviewer = index,
+            Field::Reviewer => self.reviewer = Some(index),
             Field::Urgency => self.urgency = index,
             Field::Channel => self.channel = index,
         }
