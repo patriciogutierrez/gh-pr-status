@@ -50,6 +50,7 @@ de deploy** (ver [El pipeline](#el-pipeline)):
 | `GH_PR_STATUS_REVIEW_WEBHOOK` | URL del webhook del workflow de review de Slack (`hooks.slack.com/triggers/…`). Habilita el formulario «Solicitar review» | `https://hooks.slack.com/triggers/T…/…/…` |
 | `GH_PR_STATUS_SLACK_USER` | Tu ID de usuario de Slack, que va como requester | `U0123456789` |
 | `GH_PR_STATUS_REVIEWERS` | Los reviewers del formulario, como `Nombre:ID` separados por coma | `Ana:U01,Beto:U02` |
+| `GH_PR_STATUS_SLACK_TOKEN` | Token de usuario de Slack (`xoxp-…`) con `channels:history` y `groups:history`, para ubicar el pedido de review y contar sus respuestas | `xoxp-…` |
 | `GH_PR_STATUS_REVIEW_CHANNELS` | Los canales del formulario, igual; el primero queda preseleccionado | `team-prs:C0123456789` |
 | `GH_PR_STATUS_SLACK_TEAM` | ID del workspace de Slack (`T…`, aparece en `app.slack.com/client/<id>/…`). Con él el canal se abre directo en la app de Slack; sin él pasa por el navegador | `T0123456789` |
 
@@ -177,15 +178,20 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   hora, todos los errores (servicio y causa) y un botón para abrir el comentario.
 - **Clic en el título** abre el PR en el navegador.
 - **El menú del PR**, con el «⋯» que aparece al pasar el mouse o con clic derecho, reúne sus
-  acciones: pedir al agente (salvo cuando lo que falta es responder hilos de review), solicitar
-  review, marcar un borrador listo para review (`gh pr ready`), `/deploy`, ver los logs de
-  cada check fallido (menos docs-check), copiar la URL y sacarlo del grupo.
+  acciones, en este orden: copiar la URL, ver el pedido en Slack, `/deploy`, solicitar review,
+  marcar un borrador listo para review (`gh pr ready`), pedir al agente (salvo cuando lo que
+  falta es responder hilos de review), ver los logs de cada check fallido (menos docs-check) y
+  sacarlo del grupo.
 - **Solicitar review** abre un formulario en una ventana aparte: reviewer (de la lista de
   `GH_PR_STATUS_REVIEWERS`), urgencia (highest, high, medium, low), canal, comentario, y el
   link del PR ya puesto. «Enviar a Slack» (o enter) hace un `POST` al webhook del workflow de
   review del equipo, que publica el pedido con su botón «aprobar»; tú vas como requester. La
   fila dice «review pedido hace N» hasta que el PR quede aprobado, y el menú deja de ofrecer
-  el pedido; se recuerda en `reviews.sqlite`, junto a los otros archivos locales. Necesita `GH_PR_STATUS_REVIEW_WEBHOOK`, `GH_PR_STATUS_SLACK_USER`,
+  el pedido; se recuerda en `reviews.sqlite`, junto a los otros archivos locales. Con
+  `GH_PR_STATUS_SLACK_TOKEN` (un token de usuario con `channels:history` y `groups:history`),
+  la app busca unos segundos después el mensaje que publicó el workflow, y desde ahí «Ver
+  pedido en Slack» abre el hilo exacto, la fila suma «N respuestas en Slack» y cada respuesta
+  nueva llega como notificación de macOS. Sin token, «Ver pedido en Slack» abre el canal. Necesita `GH_PR_STATUS_REVIEW_WEBHOOK`, `GH_PR_STATUS_SLACK_USER`,
   `GH_PR_STATUS_REVIEWERS` y `GH_PR_STATUS_REVIEW_CHANNELS`; sin ellas, y con
   `GH_PR_STATUS_SLACK_CHANNEL`, el menú vuelve a copiar el link y abrir el canal. El
   comentario se escribe sin campo nativo: los acentos con tecla muerta no se componen.
@@ -287,6 +293,7 @@ cargo clippy --all-targets
 | `src/tool.rs` | Encuentra `gh` y los notificadores aunque la app no herede el `PATH` del shell |
 | `src/review.rs` | El pedido de review por el webhook del workflow de Slack y su configuración |
 | `src/review_view.rs` | La ventana del formulario de review |
+| `src/slack.rs` | Lectura de Slack con el token de usuario: el mensaje del pedido y sus respuestas |
 | `src/stack.rs` | Stacks de PRs (base sobre la rama de otro) y gemelas [MASTER]/[DEV] |
 | `src/status.rs` | En qué grupo cae un PR, sus badges y el "hace N min" |
 | `src/ui.rs` | Botones, pestañas, el pill de la acción y los badges del pipeline |

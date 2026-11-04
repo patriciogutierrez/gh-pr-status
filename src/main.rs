@@ -20,6 +20,7 @@ mod orca;
 mod pipeline;
 mod review;
 mod review_view;
+mod slack;
 mod stack;
 mod status;
 mod theme;
@@ -335,9 +336,8 @@ struct Root {
     /// Where the mouse went down on the board and how far it was scrolled
     /// then, so dragging the board's empty space pans it.
     pan_from: Option<(f32, f32)>,
-    /// When a review was last asked for through Slack, by PR URL, in seconds
-    /// since the epoch.
-    review_asked: HashMap<String, i64>,
+    /// The reviews asked for through Slack, by PR URL.
+    review_asked: HashMap<String, review::Asked>,
     focus_handle: FocusHandle,
 }
 
@@ -476,6 +476,7 @@ impl Root {
             this.update(cx, |this, cx| {
                 if let Ok(snapshot) = &result {
                     this.notify_changes(&snapshot.pulls, cx);
+                    this.refresh_replies(&snapshot.pulls, cx);
                     // Without Orca there are no worktrees, and nothing to claim.
                     if let Ok(worktrees) = worktrees {
                         this.claim(&snapshot.pulls, &worktrees, cx);
@@ -1060,23 +1061,50 @@ impl Root {
     /// each failed check's logs, copy its URL and take it out of its group.
     /// Slack and `/deploy` only on the user's own open PRs.
     fn pull_menu(&self, url: &str, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let mut items = Vec::new();
         let now = now();
+        // The order is fixed: copy, the Slack thread, /deploy, then the rest.
+        let copied = url.to_string();
+        let mut items = vec![ui::menu_item(
+            "menu-copy-url",
+            "Copiar URL",
+            move |_event, _window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+            },
+        )];
+        if let Some(link) = self.request_link(url) {
+            items.push(ui::menu_item(
+                "menu-request",
+                "Ver pedido en Slack",
+                move |_event, _window, cx| cx.open_url(&link),
+            ));
+        }
+
         if let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) {
             let mine = pull.author == self.login().unwrap_or_default();
-            let action = status::action(pull, stack::below(pull, self.mine.pulls()), now);
-            // Review threads get answered by hand, never by the agent.
-            let task = action.task.filter(|_| mine && pull.threads.is_empty());
-            if let Some(task) = task {
-                let asked = url.to_string();
+            let deploying = pull
+                .pipeline
+                .as_ref()
+                .is_some_and(|run| run.state(now) == State::Running);
+            if mine && !pull.draft && !deploying {
+                let label = match self.deploys.get(url) {
+                    Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR => {
+                        "¿Enviar /deploy? Clic de nuevo para confirmar"
+                    }
+                    Some(Deploy::Sending) => "Enviando /deploy…",
+                    _ => "/deploy",
+                };
+                let target = url.to_string();
                 items.push(ui::menu_item(
-                    "menu-ask",
-                    if self.opening_agent.is_some() {
-                        "Pidiendo al agente…".to_string()
-                    } else {
-                        format!("Pedir al agente: {task}")
-                    },
-                    cx.listener(move |this, _event, _window, cx| this.ask_agent(&asked, cx)),
+                    "menu-deploy",
+                    label,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.deploy(&target, cx);
+                        // The first click only asks; keep the menu open for
+                        // the one that confirms.
+                        if matches!(this.deploys.get(&target), Some(Deploy::Confirming(_))) {
+                            cx.stop_propagation();
+                        }
+                    }),
                 ));
             }
             // Once asked for, the review is on its way: the item goes until the
@@ -1103,10 +1131,6 @@ impl Root {
                     },
                 ));
             }
-            let deploying = pull
-                .pipeline
-                .as_ref()
-                .is_some_and(|run| run.state(now) == State::Running);
             if mine && pull.draft {
                 let target = url.to_string();
                 items.push(ui::menu_item(
@@ -1115,26 +1139,19 @@ impl Root {
                     cx.listener(move |this, _event, _window, cx| this.mark_ready(&target, cx)),
                 ));
             }
-            if mine && !pull.draft && !deploying {
-                let label = match self.deploys.get(url) {
-                    Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR => {
-                        "¿Enviar /deploy? Clic de nuevo para confirmar"
-                    }
-                    Some(Deploy::Sending) => "Enviando /deploy…",
-                    _ => "/deploy",
-                };
-                let target = url.to_string();
+            let action = status::action(pull, stack::below(pull, self.mine.pulls()), now);
+            // Review threads get answered by hand, never by the agent.
+            let task = action.task.filter(|_| mine && pull.threads.is_empty());
+            if let Some(task) = task {
+                let asked = url.to_string();
                 items.push(ui::menu_item(
-                    "menu-deploy",
-                    label,
-                    cx.listener(move |this, _event, _window, cx| {
-                        this.deploy(&target, cx);
-                        // The first click only asks; keep the menu open for
-                        // the one that confirms.
-                        if matches!(this.deploys.get(&target), Some(Deploy::Confirming(_))) {
-                            cx.stop_propagation();
-                        }
-                    }),
+                    "menu-ask",
+                    if self.opening_agent.is_some() {
+                        "Pidiendo al agente…".to_string()
+                    } else {
+                        format!("Pedir al agente: {task}")
+                    },
+                    cx.listener(move |this, _event, _window, cx| this.ask_agent(&asked, cx)),
                 ));
             }
             // The docs check's logs never say more than its name does.
@@ -1153,14 +1170,6 @@ impl Root {
             }
         }
 
-        let copied = url.to_string();
-        items.push(ui::menu_item(
-            "menu-copy-url",
-            "Copiar URL",
-            move |_event, _window, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-            },
-        ));
         if self.folders.by_url.contains_key(url) {
             let url = url.to_string();
             items.push(ui::menu_item(
@@ -2492,11 +2501,16 @@ fn section(title: &str, color: u32, rows: Vec<gpui::AnyElement>) -> impl IntoEle
 /// number, CI, review, conflicts, draft, when a review was asked for through
 /// Slack (`asked`) until it is approved, comments and, unless `compact`, the
 /// branches.
-fn meta(pull: &PullRequest, compact: bool, asked: Option<&i64>) -> String {
+fn meta(pull: &PullRequest, compact: bool, asked: Option<&review::Asked>) -> String {
     let mut parts = vec![format!("{} #{}", pull.repo_name(), pull.number)];
     parts.extend(status::badges(pull).into_iter().map(|badge| badge.label));
     if let Some(asked) = asked.filter(|_| pull.review != Review::Approved) {
-        parts.push(format!("review pedido {}", status::ago(now() - asked)));
+        parts.push(format!("review pedido {}", status::ago(now() - asked.at)));
+        match asked.replies {
+            0 => {}
+            1 => parts.push("1 respuesta en Slack".to_string()),
+            n => parts.push(format!("{n} respuestas en Slack")),
+        }
     }
     match pull.comments {
         0 => {}
@@ -2616,12 +2630,148 @@ fn steps(pull: &PullRequest, run: &Pipeline) -> impl IntoElement {
 }
 
 impl review_view::Requester for Root {
-    fn review_asked(&mut self, url: &str, cx: &mut Context<Self>) {
-        let at = now();
-        self.review_asked.insert(url.to_string(), at);
-        let url = url.to_string();
-        self.save(cx, move || review::remember(&url, at));
+    fn review_asked(&mut self, url: &str, channel: &str, cx: &mut Context<Self>) {
+        let asked = review::Asked {
+            at: now(),
+            channel: channel.to_string(),
+            ..review::Asked::default()
+        };
+        self.review_asked.insert(url.to_string(), asked.clone());
+        let saved = url.to_string();
+        self.save(cx, move || review::remember(&saved, &asked));
+        self.locate_request(url, cx);
         cx.notify();
+    }
+}
+
+impl Root {
+    /// How long the workflow gets to post before its message is looked for.
+    const LOCATE_AFTER: Duration = Duration::from_secs(8);
+
+    /// Finds the message the workflow posted for the PR, a moment after the
+    /// request, and keeps its link. Without a Slack token there is nothing
+    /// to look with.
+    fn locate_request(&mut self, url: &str, cx: &mut Context<Self>) {
+        let (Some(token), Some(asked)) = (slack::token(), self.review_asked.get(url)) else {
+            return;
+        };
+        let (url, channel) = (url.to_string(), asked.channel.clone());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Self::LOCATE_AFTER).await;
+            let needle = url.clone();
+            let found = cx
+                .background_executor()
+                .spawn(async move { slack::find_message(&token, &channel, &needle) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                match found {
+                    Ok(Some(message)) => {
+                        if let Some(asked) = this.review_asked.get_mut(&url) {
+                            asked.ts = Some(message.ts);
+                            asked.permalink = Some(message.permalink);
+                            let (saved, asked) = (url.clone(), asked.clone());
+                            this.save(cx, move || review::remember(&saved, &asked));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => this.folders_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Counts the replies under each request's message, for the PRs still
+    /// waiting on their review, and tells about new ones. Runs with each
+    /// reload of "Mis PRs".
+    fn refresh_replies(&mut self, pulls: &[PullRequest], cx: &mut Context<Self>) {
+        let Some(token) = slack::token() else {
+            return;
+        };
+        let threads: Vec<(String, String, String, String, i64)> = pulls
+            .iter()
+            .filter(|pull| pull.review != Review::Approved)
+            .filter_map(|pull| {
+                let asked = self.review_asked.get(&pull.url)?;
+                Some((
+                    pull.url.clone(),
+                    pull.title.clone(),
+                    asked.channel.clone(),
+                    asked.ts.clone()?,
+                    asked.replies,
+                ))
+            })
+            .collect();
+        if threads.is_empty() {
+            return;
+        }
+
+        cx.spawn(async move |this, cx| {
+            let counted = cx
+                .background_executor()
+                .spawn(async move {
+                    threads
+                        .into_iter()
+                        .filter_map(|(url, title, channel, ts, before)| {
+                            let replies = slack::replies(&token, &channel, &ts).ok()?;
+                            Some((url, title, before, replies as i64))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                for (url, title, before, replies) in counted {
+                    let Some(asked) = this.review_asked.get_mut(&url) else {
+                        continue;
+                    };
+                    if replies == before {
+                        continue;
+                    }
+                    asked.replies = replies;
+                    let (saved, snapshot) = (url.clone(), asked.clone());
+                    let permalink = snapshot.permalink.clone().unwrap_or_default();
+                    this.save(cx, move || review::remember(&saved, &snapshot));
+                    if replies > before {
+                        let notice = notify::Notice {
+                            title: format!(
+                                "{} respuesta{} en Slack",
+                                replies,
+                                if replies == 1 { "" } else { "s" }
+                            ),
+                            subtitle: "Pedido de review".to_string(),
+                            body: title,
+                            url: permalink,
+                        };
+                        cx.background_executor()
+                            .spawn(async move { notify::send(&notice) })
+                            .detach();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Where the PR's review request lives in Slack: the thread when it was
+    /// found, else the channel.
+    fn request_link(&self, url: &str) -> Option<String> {
+        let asked = self.review_asked.get(url)?;
+        if let Some(permalink) = &asked.permalink {
+            return Some(permalink.clone());
+        }
+        let channel = &asked.channel;
+        Some(match env::var("GH_PR_STATUS_SLACK_TEAM") {
+            Ok(team) if !team.trim().is_empty() => {
+                format!("slack://channel?team={}&id={channel}", team.trim())
+            }
+            _ => format!("https://slack.com/app_redirect?channel={channel}"),
+        })
     }
 }
 

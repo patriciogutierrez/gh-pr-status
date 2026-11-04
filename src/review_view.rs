@@ -25,7 +25,8 @@ enum Field {
 
 /// What the main window hears back once the request is sent.
 pub trait Requester: 'static {
-    fn review_asked(&mut self, url: &str, cx: &mut Context<Self>)
+    /// The request for `url` went to `channel`.
+    fn review_asked(&mut self, url: &str, channel: &str, cx: &mut Context<Self>)
     where
         Self: Sized;
 }
@@ -143,8 +144,14 @@ impl<R: Requester> ReviewView<R> {
             this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => {
                     let url = this.url.clone();
+                    let channel = this
+                        .config
+                        .channels
+                        .get(this.channel)
+                        .map(|c| c.id.clone())
+                        .unwrap_or_default();
                     this.root
-                        .update(cx, |root, cx| root.review_asked(&url, cx))
+                        .update(cx, |root, cx| root.review_asked(&url, &channel, cx))
                         .ok();
                     window.remove_window();
                 }

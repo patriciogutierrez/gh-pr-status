@@ -135,30 +135,63 @@ pub fn send(config: &Config, request: &Request) -> Result<(), String> {
     }
 }
 
-/// When a review was last asked for, by PR URL, as seconds since the epoch.
-pub fn asked() -> Result<HashMap<String, i64>, String> {
+/// A review asked for through the workflow: when, in which channel, and,
+/// once found, the message it posted and how many replies it has.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Asked {
+    /// Seconds since the epoch.
+    pub at: i64,
+    pub channel: String,
+    pub ts: Option<String>,
+    pub permalink: Option<String>,
+    pub replies: i64,
+}
+
+/// Every review asked for, by PR URL.
+pub fn asked() -> Result<HashMap<String, Asked>, String> {
     read_asked(&open()?)
 }
 
-pub fn remember(url: &str, at: i64) -> Result<(), String> {
-    write_asked(&open()?, url, at)
+pub fn remember(url: &str, asked: &Asked) -> Result<(), String> {
+    write_asked(&open()?, url, asked)
 }
 
-fn read_asked(db: &Connection) -> Result<HashMap<String, i64>, String> {
+fn read_asked(db: &Connection) -> Result<HashMap<String, Asked>, String> {
     let mut statement = db
-        .prepare("SELECT url, asked_at FROM requests")
+        .prepare("SELECT url, asked_at, channel, ts, permalink, replies FROM requests")
         .map_err(db_error)?;
     statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                Asked {
+                    at: row.get(1)?,
+                    channel: row.get(2)?,
+                    ts: row.get(3)?,
+                    permalink: row.get(4)?,
+                    replies: row.get(5)?,
+                },
+            ))
+        })
         .and_then(|rows| rows.collect())
         .map_err(db_error)
 }
 
-fn write_asked(db: &Connection, url: &str, at: i64) -> Result<(), String> {
+fn write_asked(db: &Connection, url: &str, asked: &Asked) -> Result<(), String> {
     db.execute(
-        "INSERT INTO requests (url, asked_at) VALUES (?1, ?2)
-         ON CONFLICT(url) DO UPDATE SET asked_at = excluded.asked_at",
-        params![url, at],
+        "INSERT INTO requests (url, asked_at, channel, ts, permalink, replies)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(url) DO UPDATE SET
+             asked_at = excluded.asked_at, channel = excluded.channel, ts = excluded.ts,
+             permalink = excluded.permalink, replies = excluded.replies",
+        params![
+            url,
+            asked.at,
+            asked.channel,
+            asked.ts,
+            asked.permalink,
+            asked.replies
+        ],
     )
     .map(drop)
     .map_err(db_error)
@@ -172,9 +205,36 @@ fn open() -> Result<Connection, String> {
 
 fn migrate(db: &Connection) -> Result<(), String> {
     db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS requests (url TEXT PRIMARY KEY, asked_at INTEGER NOT NULL);",
+        "CREATE TABLE IF NOT EXISTS requests (
+             url TEXT PRIMARY KEY,
+             asked_at INTEGER NOT NULL,
+             channel TEXT NOT NULL DEFAULT '',
+             ts TEXT,
+             permalink TEXT,
+             replies INTEGER NOT NULL DEFAULT 0
+         );",
     )
-    .map_err(db_error)
+    .map_err(db_error)?;
+
+    // Files from before the Slack message was tracked lack the columns. The
+    // window opens several connections at once, so the check and the change
+    // hold the write lock.
+    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)
+        .map_err(db_error)?;
+    let has_channel = tx
+        .prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name = 'channel'")
+        .and_then(|mut statement| statement.exists([]))
+        .map_err(db_error)?;
+    if !has_channel {
+        tx.execute_batch(
+            "ALTER TABLE requests ADD COLUMN channel TEXT NOT NULL DEFAULT '';
+             ALTER TABLE requests ADD COLUMN ts TEXT;
+             ALTER TABLE requests ADD COLUMN permalink TEXT;
+             ALTER TABLE requests ADD COLUMN replies INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(db_error)?;
+    }
+    tx.commit().map_err(db_error)
 }
 
 fn db_error(error: rusqlite::Error) -> String {
@@ -223,14 +283,42 @@ mod tests {
     fn a_request_is_remembered_and_asking_again_updates_it() {
         let db = Connection::open_in_memory().unwrap();
         migrate(&db).unwrap();
+        let url = "https://github.com/acme/demo/pull/1";
+        let first = Asked {
+            at: 100,
+            channel: "C1".to_string(),
+            ..Asked::default()
+        };
+        let found = Asked {
+            at: 200,
+            channel: "C1".to_string(),
+            ts: Some("1.0".to_string()),
+            permalink: Some("https://slack/p1".to_string()),
+            replies: 2,
+        };
 
-        write_asked(&db, "https://github.com/acme/demo/pull/1", 100).unwrap();
-        write_asked(&db, "https://github.com/acme/demo/pull/1", 200).unwrap();
+        write_asked(&db, url, &first).unwrap();
+        write_asked(&db, url, &found).unwrap();
 
         assert_eq!(
             read_asked(&db).unwrap(),
-            HashMap::from([("https://github.com/acme/demo/pull/1".to_string(), 200)])
+            HashMap::from([(url.to_string(), found)])
         );
+    }
+
+    #[test]
+    fn a_file_from_before_slack_messages_gains_the_columns() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE requests (url TEXT PRIMARY KEY, asked_at INTEGER NOT NULL);
+             INSERT INTO requests VALUES ('u', 5);",
+        )
+        .unwrap();
+
+        migrate(&db).unwrap();
+        migrate(&db).unwrap();
+
+        assert_eq!(read_asked(&db).unwrap()["u"].at, 5);
     }
 
     #[test]
