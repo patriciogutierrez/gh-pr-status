@@ -184,6 +184,11 @@ pub fn comment(url: &str, body: &str) -> Result<(), String> {
     .map(|_| ())
 }
 
+/// Takes the PR out of draft.
+pub fn mark_ready(url: &str) -> Result<(), String> {
+    gh(&["pr".to_string(), "ready".to_string(), url.to_string()]).map(|_| ())
+}
+
 /// Runs `gh` and returns its stdout, or an error worth showing as is.
 pub fn gh(args: &[String]) -> Result<Vec<u8>, String> {
     let output = Command::new(tool::path("gh"))

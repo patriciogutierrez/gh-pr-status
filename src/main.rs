@@ -304,8 +304,6 @@ struct Root {
     sidebar_width: f32,
     /// The group whose agent is being opened in Orca.
     opening_agent: Option<i64>,
-    /// Board columns whose merged PRs are unfolded.
-    merged_open: HashSet<i64>,
     /// PRs whose review threads are unfolded, by URL.
     threads_open: HashSet<String>,
     /// When a review was last asked for through Slack, by PR URL, in seconds
@@ -331,7 +329,6 @@ impl Root {
             hovered: None,
             sidebar_width: SIDEBAR_WIDTH,
             opening_agent: None,
-            merged_open: HashSet::new(),
             threads_open: HashSet::new(),
             review_asked: HashMap::new(),
             focus_handle: cx.focus_handle(),
@@ -961,6 +958,28 @@ impl Root {
         cx.notify();
     }
 
+    /// Takes the draft out of draft and reloads "Mis PRs" so it moves section.
+    fn mark_ready(&mut self, url: &str, cx: &mut Context<Self>) {
+        let url = url.to_string();
+        cx.spawn(async move |this, cx| {
+            let target = url.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { github::mark_ready(&target) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => this.reload(cx),
+                    Err(error) => this.folders_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The deploy button's click: the first one asks for confirmation, the
     /// second one, within `CONFIRM_FOR`, comments `/deploy` on the PR and
     /// reloads "Mis PRs" so the bot's run shows up.
@@ -1056,6 +1075,14 @@ impl Root {
                 .pipeline
                 .as_ref()
                 .is_some_and(|run| run.state(now) == State::Running);
+            if mine && pull.draft {
+                let target = url.to_string();
+                items.push(ui::menu_item(
+                    "menu-ready",
+                    "Marcar listo para review",
+                    cx.listener(move |this, _event, _window, cx| this.mark_ready(&target, cx)),
+                ));
+            }
             if mine && !pull.draft && !deploying {
                 let label = match self.deploys.get(url) {
                     Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR => {
@@ -1583,8 +1610,7 @@ impl Root {
                     return self.board(group, &snapshot.pulls, cx).into_any_element();
                 }
                 let pulls = self.visible(&snapshot.pulls);
-                let merged = self.folder_merged();
-                if pulls.is_empty() && merged.is_empty() {
+                if pulls.is_empty() {
                     return message(
                         if self.filter == Filter::All {
                             "No tienes PRs abiertos."
@@ -1595,7 +1621,7 @@ impl Root {
                     )
                     .into_any_element();
                 }
-                self.mine_list(&pulls, &merged, cx).into_any_element()
+                self.mine_list(&pulls, cx).into_any_element()
             }
         }
     }
@@ -1605,25 +1631,9 @@ impl Root {
         pulls.iter().filter(|pull| self.shows(&pull.url)).collect()
     }
 
-    /// The merged PRs of the selected group, so a group's view shows what of
-    /// it already shipped. Empty unless a group is selected.
-    fn folder_merged(&self) -> Vec<&merged::Merged> {
-        match (self.filter, &self.merged.pulls) {
-            (Filter::Folder(_), Some(pulls)) => {
-                pulls.iter().filter(|pull| self.shows(&pull.url)).collect()
-            }
-            _ => Vec::new(),
-        }
-    }
-
     /// The user's own PRs: a one-line count per group, then one section per
-    /// group, and last the selected group's merged PRs.
-    fn mine_list(
-        &self,
-        pulls: &[&PullRequest],
-        merged: &[&merged::Merged],
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// group.
+    fn mine_list(&self, pulls: &[&PullRequest], cx: &mut Context<Self>) -> impl IntoElement {
         let now = now();
         let in_group = |group: Group| {
             pulls
@@ -1632,7 +1642,7 @@ impl Root {
                 .filter(move |pull| Group::of(pull, now) == group)
         };
 
-        let mut sections: Vec<_> = Group::ALL
+        let sections: Vec<_> = Group::ALL
             .into_iter()
             .filter_map(|group| {
                 let rows: Vec<_> = in_group(group)
@@ -1642,13 +1652,6 @@ impl Root {
                     .then(|| section(group.title(), group.color(), rows).into_any_element())
             })
             .collect();
-        if !merged.is_empty() {
-            let rows = merged
-                .iter()
-                .map(|pull| self.merged_row(pull, true, cx).into_any_element())
-                .collect();
-            sections.push(section("Mergeadas", theme::ACCENT, rows).into_any_element());
-        }
 
         div()
             .flex()
@@ -1698,34 +1701,22 @@ impl Root {
     fn board(&self, id: i64, pulls: &[PullRequest], cx: &mut Context<Self>) -> impl IntoElement {
         let now = now();
         let visible = self.visible(pulls);
-        let merged = self.merged.pulls.as_deref().unwrap_or_default();
-        let in_column = |column: i64| {
-            let open: Vec<_> = visible
+        let in_column = |column: i64| -> Vec<&PullRequest> {
+            visible
                 .iter()
                 .copied()
                 .filter(|pull| self.folders.by_url.get(&pull.url) == Some(&column))
-                .collect();
-            let shipped: Vec<_> = merged
-                .iter()
-                .filter(|pull| self.folders.by_url.get(&pull.url) == Some(&column))
-                .collect();
-            (open, shipped)
+                .collect()
         };
 
         let mut columns = Vec::new();
-        let (open, shipped) = in_column(id);
-        if !open.is_empty() || !shipped.is_empty() {
-            columns.push(
-                self.board_column(id, &open, &shipped, cx)
-                    .into_any_element(),
-            );
+        let open = in_column(id);
+        if !open.is_empty() {
+            columns.push(self.board_column(id, &open, cx).into_any_element());
         }
         for subgroup in self.folders.children(id) {
-            let (open, shipped) = in_column(subgroup.id);
-            columns.push(
-                self.board_column(subgroup.id, &open, &shipped, cx)
-                    .into_any_element(),
-            );
+            let open = in_column(subgroup.id);
+            columns.push(self.board_column(subgroup.id, &open, cx).into_any_element());
         }
 
         div()
@@ -1767,14 +1758,13 @@ impl Root {
     }
 
     /// One column of the board, for a subgroup or, as "Sin subgrupo", for the
-    /// PRs in the group itself: its name and count, its PRs by what they wait
-    /// on, and its merged PRs folded at the bottom. A PR dropped on it moves
-    /// into its group; a right click on the name opens the group's menu.
+    /// PRs in the group itself: its name and count, and its PRs by what they
+    /// wait on. A PR dropped on it moves into its group; a right click on the
+    /// name opens the group's menu.
     fn board_column(
         &self,
         id: i64,
         open: &[&PullRequest],
-        shipped: &[&merged::Merged],
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let now = now();
@@ -1806,8 +1796,6 @@ impl Root {
                     .into_any_element(),
             );
         }
-        let unfolded = self.merged_open.contains(&id);
-
         div()
             .id(SharedString::from(format!("column-{id}")))
             .flex()
@@ -1852,39 +1840,7 @@ impl Root {
                     .min_h(px(0.))
                     .overflow_y_scroll()
                     .map(own_axis_only)
-                    .children(cards)
-                    .when(!shipped.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .id(SharedString::from(format!("column-merged-{id}")))
-                                .px_1()
-                                .py_1()
-                                .rounded_md()
-                                .text_xs()
-                                .text_color(rgb(theme::ACCENT))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
-                                .on_click(cx.listener(move |this, _event, _window, cx| {
-                                    if !this.merged_open.remove(&id) {
-                                        this.merged_open.insert(id);
-                                    }
-                                    cx.notify();
-                                }))
-                                .child(format!(
-                                    "{} {} mergeado{}",
-                                    if unfolded { "▾" } else { "▸" },
-                                    shipped.len(),
-                                    if shipped.len() == 1 { "" } else { "s" }
-                                )),
-                        )
-                        .when(unfolded, |this| {
-                            this.children(
-                                shipped
-                                    .iter()
-                                    .map(|pull| self.merged_row(pull, true, cx).into_any_element()),
-                            )
-                        })
-                    }),
+                    .children(cards),
             )
     }
 
