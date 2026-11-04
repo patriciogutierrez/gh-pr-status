@@ -84,8 +84,8 @@ pub struct Action {
 }
 
 /// The next action on the PR, by what blocks it first: a failed deploy,
-/// conflicts, red CI, requested changes; then what it waits on, starting with
-/// the PR it is stacked on (`below`); then merging.
+/// conflicts, red CI, requested changes, open review threads; then what it
+/// waits on, starting with the PR it is stacked on (`below`); then merging.
 pub fn action(pull: &PullRequest, below: Option<&PullRequest>, now: i64) -> Action {
     let act = |label: String, color: u32, task: Option<String>| Action { label, color, task };
     let names = |logins: &[String]| {
@@ -155,6 +155,13 @@ pub fn action(pull: &PullRequest, below: Option<&PullRequest>, now: i64) -> Acti
             theme::YELLOW,
             None,
         );
+    }
+    if !pull.threads.is_empty() {
+        let label = match pull.threads.len() {
+            1 => "Responder 1 hilo de review".to_string(),
+            n => format!("Responder {n} hilos de review"),
+        };
+        return act(label.clone(), theme::RED, Some(label));
     }
     if pull.checks == Checks::Pending {
         return act("Esperando CI".to_string(), theme::YELLOW, None);
@@ -300,6 +307,7 @@ mod tests {
             requested_reviewers: Vec::new(),
             mergeable: Mergeable::Clean,
             comments: 0,
+            threads: Vec::new(),
             updated_at: 0,
             pipeline: None,
         }
@@ -446,6 +454,21 @@ mod tests {
         let to_publish = action(&draft, None, 0);
         let ready = action(&pull(), None, 0);
         let stacked = action(&pull(), Some(&waiting), 0);
+        let threaded = action(
+            &PullRequest {
+                threads: vec![crate::github::Thread {
+                    author: "ana".to_string(),
+                    path: "a.py".to_string(),
+                    line: None,
+                    body: String::new(),
+                    url: String::new(),
+                    replies: 0,
+                }],
+                ..pull()
+            },
+            None,
+            0,
+        );
 
         assert_eq!(conflicts.label, "Resolver conflictos con master");
         assert_eq!(
@@ -465,6 +488,8 @@ mod tests {
             "Arreglar CI: pytest, docs-check"
         );
         assert_eq!(stacked.label, "Esperando el merge de #1");
+        assert_eq!(threaded.label, "Responder 1 hilo de review");
+        assert!(threaded.task.is_some());
         assert_eq!(asked.label, "Esperando review de @carla");
         assert_eq!(asked.task, None);
         assert_eq!(to_publish.label, "Sacar de borrador");

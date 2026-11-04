@@ -304,6 +304,8 @@ struct Root {
     opening_agent: Option<i64>,
     /// Board columns whose merged PRs are unfolded.
     merged_open: HashSet<i64>,
+    /// PRs whose review threads are unfolded, by URL.
+    threads_open: HashSet<String>,
     focus_handle: FocusHandle,
 }
 
@@ -325,6 +327,7 @@ impl Root {
             sidebar_width: SIDEBAR_WIDTH,
             opening_agent: None,
             merged_open: HashSet::new(),
+            threads_open: HashSet::new(),
             focus_handle: cx.focus_handle(),
         };
         root.start_clock(cx);
@@ -562,6 +565,93 @@ impl Root {
             self.expanded.insert(url.to_string());
         }
         cx.notify();
+    }
+
+    fn toggle_threads(&mut self, url: &str, cx: &mut Context<Self>) {
+        if !self.threads_open.remove(url) {
+            self.threads_open.insert(url.to_string());
+        }
+        cx.notify();
+    }
+
+    /// The PR's unresolved review threads: a line to unfold them, then each
+    /// thread's author, place and gist. Clicking a thread opens it on GitHub.
+    fn threads(&self, pull: &PullRequest, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        if pull.threads.is_empty() {
+            return Vec::new();
+        }
+        let open = self.threads_open.contains(&pull.url);
+        let url = pull.url.clone();
+        let count = pull.threads.len();
+        let mut lines = vec![
+            div()
+                .id(SharedString::from(format!("threads-{}", pull.url)))
+                .ml(px(16.))
+                .px_1()
+                .rounded_md()
+                .text_xs()
+                .text_color(rgb(theme::SUBTEXT))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme::SURFACE)))
+                .on_click(
+                    cx.listener(move |this, _event, _window, cx| this.toggle_threads(&url, cx)),
+                )
+                .child(format!(
+                    "{} {count} hilo{} sin resolver",
+                    if open { "▾" } else { "▸" },
+                    if count == 1 { "" } else { "s" }
+                ))
+                .into_any_element(),
+        ];
+        if !open {
+            return lines;
+        }
+        for (index, thread) in pull.threads.iter().enumerate() {
+            let at = match thread.line {
+                Some(line) => format!("{}:{line}", thread.path),
+                None => thread.path.clone(),
+            };
+            let link = thread.url.clone();
+            lines.push(
+                div()
+                    .id(SharedString::from(format!("thread-{index}-{}", pull.url)))
+                    .ml(px(16.))
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(theme::MANTLE))
+                    .text_xs()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme::SURFACE)))
+                    .on_click(move |_event, _window, cx| cx.open_url(&link))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .text_color(rgb(theme::MUTED))
+                            .child(format!("@{}", thread.author))
+                            .child(div().flex_1().min_w(px(0.)).truncate().child(at))
+                            .when(thread.replies > 0, |this| {
+                                this.child(format!(
+                                    "{} respuesta{}",
+                                    thread.replies,
+                                    if thread.replies == 1 { "" } else { "s" }
+                                ))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(theme::SUBTEXT))
+                            .line_clamp(2)
+                            .child(thread.body.clone()),
+                    )
+                    .into_any_element(),
+            );
+        }
+        lines
     }
 
     /// Reads the groups from disk, replacing whatever is in memory.
@@ -2010,6 +2100,7 @@ impl Root {
                     ),
             )
             .children(relations(pull, pulls))
+            .children(self.threads(pull, cx))
             .when_some(
                 match self.deploys.get(&pull.url) {
                     Some(Deploy::Failed(error)) => Some(error.clone()),

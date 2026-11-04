@@ -263,6 +263,7 @@ mod tests {
             requested_reviewers: Vec::new(),
             mergeable: Mergeable::Clean,
             comments: 0,
+            threads: Vec::new(),
             updated_at: NOW,
             pipeline: Some(Pipeline {
                 url: comment.to_string(),

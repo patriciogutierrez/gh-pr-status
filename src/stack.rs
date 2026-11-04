@@ -104,6 +104,7 @@ mod tests {
             requested_reviewers: Vec::new(),
             mergeable: Mergeable::Clean,
             comments: 0,
+            threads: Vec::new(),
             updated_at: 0,
             pipeline: None,
         }

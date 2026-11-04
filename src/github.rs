@@ -33,6 +33,12 @@ query($search: String!) {
         reviewRequests(first: 10) {
           nodes { requestedReviewer { ... on User { login } ... on Team { name } } }
         }
+        reviewThreads(first: 50) {
+          nodes {
+            isResolved isOutdated
+            comments(first: 1) { totalCount nodes { author { login } body path line url } }
+          }
+        }
         commits(last: 1) {
           nodes {
             commit {
@@ -107,6 +113,8 @@ pub struct PullRequest {
     pub requested_reviewers: Vec<String>,
     pub mergeable: Mergeable,
     pub comments: u64,
+    /// Review threads nobody has resolved, on code that is still current.
+    pub threads: Vec<Thread>,
     /// Seconds since the Unix epoch.
     pub updated_at: i64,
     /// The latest CI/CD run reported by the bot; only fetched for the user's PRs.
@@ -128,6 +136,19 @@ pub struct FailedCheck {
     pub reason: Option<String>,
     /// Where its logs are.
     pub url: Option<String>,
+}
+
+/// An unresolved review thread: who opened it, where, and what it says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Thread {
+    pub author: String,
+    pub path: String,
+    pub line: Option<u64>,
+    /// The first comment, stripped of bot markup and cut short.
+    pub body: String,
+    pub url: String,
+    /// Comments in the thread after the first.
+    pub replies: u64,
 }
 
 pub struct Snapshot {
@@ -235,6 +256,7 @@ fn parse_pull(node: &Value) -> Option<PullRequest> {
             _ => Mergeable::Unknown,
         },
         comments: node["comments"]["totalCount"].as_u64().unwrap_or(0),
+        threads: threads(node),
         updated_at: node["updatedAt"]
             .as_str()
             .and_then(parse_timestamp)
@@ -296,6 +318,62 @@ fn failure_reason(context: &Value) -> Option<String> {
         .or(context["description"].as_str())
         .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
         .map(str::to_string)
+}
+
+fn threads(node: &Value) -> Vec<Thread> {
+    let Some(threads) = node["reviewThreads"]["nodes"].as_array() else {
+        return Vec::new();
+    };
+
+    threads
+        .iter()
+        .filter(|thread| {
+            thread["isResolved"].as_bool() == Some(false)
+                && thread["isOutdated"].as_bool() != Some(true)
+        })
+        .filter_map(|thread| {
+            let first = &thread["comments"]["nodes"][0];
+            let text = |key: &str| first[key].as_str().unwrap_or_default().to_string();
+            Some(Thread {
+                author: first["author"]["login"].as_str()?.to_string(),
+                path: text("path"),
+                line: first["line"].as_u64(),
+                body: clean_body(first["body"].as_str()?),
+                url: text("url"),
+                replies: thread["comments"]["totalCount"]
+                    .as_u64()
+                    .unwrap_or(1)
+                    .saturating_sub(1),
+            })
+        })
+        .collect()
+}
+
+/// How long a thread's first comment is shown, in characters.
+const BODY_LIMIT: usize = 240;
+
+/// A comment's gist: HTML comments (bot metadata) dropped, anything from a
+/// `<details>` block on (the bot's prompt for agents) dropped, lines joined,
+/// and cut at `BODY_LIMIT`.
+fn clean_body(body: &str) -> String {
+    let mut text = String::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("<!--") {
+        text.push_str(&rest[..start]);
+        rest = match rest[start..].find("-->") {
+            Some(end) => &rest[start + end + 3..],
+            None => "",
+        };
+    }
+    text.push_str(rest);
+    let text = text.split("<details>").next().unwrap_or_default();
+    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if joined.chars().count() > BODY_LIMIT {
+        let cut: String = joined.chars().take(BODY_LIMIT - 1).collect();
+        format!("{}…", cut.trim_end())
+    } else {
+        joined
+    }
 }
 
 fn approvers(node: &Value) -> Vec<String> {
@@ -400,6 +478,47 @@ mod tests {
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
         base
+    }
+
+    #[test]
+    fn only_open_current_threads_are_kept_with_their_gist() {
+        let threads = json!({ "nodes": [
+            { "isResolved": false, "isOutdated": false, "comments": { "totalCount": 3, "nodes": [{
+                "author": { "login": "cubic-dev-ai" }, "path": "models/x.py", "line": 79,
+                "url": "https://github.com/acme/payments/pull/539#discussion_r1",
+                "body": "<!-- cubic:v=1 -->\n<!-- metadata:{\"confidence\":7} -->\nP1: Accept the public ID here.\n\n<details>\n<summary>Prompt for AI agents</summary>\nignored\n</details>"
+            }] } },
+            { "isResolved": true, "isOutdated": false, "comments": { "totalCount": 1, "nodes": [{
+                "author": { "login": "ana" }, "path": "a.py", "line": 1, "url": "u", "body": "done"
+            }] } },
+            { "isResolved": false, "isOutdated": true, "comments": { "totalCount": 1, "nodes": [{
+                "author": { "login": "ana" }, "path": "a.py", "line": 1, "url": "u", "body": "stale"
+            }] } }
+        ] });
+
+        let pull = parse_pull(&node(json!({ "reviewThreads": threads }))).unwrap();
+
+        assert_eq!(
+            pull.threads,
+            [Thread {
+                author: "cubic-dev-ai".to_string(),
+                path: "models/x.py".to_string(),
+                line: Some(79),
+                body: "P1: Accept the public ID here.".to_string(),
+                url: "https://github.com/acme/payments/pull/539#discussion_r1".to_string(),
+                replies: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_long_comment_is_cut_at_the_limit() {
+        let long = "palabra ".repeat(100);
+
+        let cut = clean_body(&long);
+
+        assert_eq!(cut.chars().count(), BODY_LIMIT);
+        assert!(cut.ends_with('…'));
     }
 
     #[test]

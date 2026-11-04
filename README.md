@@ -151,6 +151,11 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   escribe la tarea con el PR, la rama, los checks fallidos y sus logs, y cómo ubicar o crear el
   worktree. El PR tiene que estar en un grupo; si el agente recién abrió y pregunta si confías
   en la carpeta, hay que responderle en Orca y pedir de nuevo.
+- **Hilos de review sin resolver**: la fila dice «▸ N hilos sin resolver» y al desplegarlos
+  muestra quién los abrió, en qué archivo y línea, y el comienzo del comentario (sin la
+  metadata de los bots); el clic abre el hilo en GitHub. Con hilos abiertos, la siguiente acción
+  pasa a «Responder N hilos de review» y «Pedir al agente» le manda cada hilo con su link.
+  Solo cuentan los hilos sobre código vigente (GitHub marca los demás como desactualizados).
 - **Stacks**: si la base de un PR es la rama de otro PR tuyo abierto, la fila muestra la
   cadena completa (`master ← #7684 ← [#7685]`) y la siguiente acción pasa a «Esperando el
   merge de #7684»; solo el de abajo dice «Mergear». Cuando GitHub re-apunta un PR a otra base
