@@ -179,7 +179,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   hora, todos los errores (servicio y causa) y un botón para abrir el comentario.
 - **Clic en el título** abre el PR en el navegador.
 - **El menú del PR**, con el «⋯» que aparece al pasar el mouse o con clic derecho, reúne sus
-  acciones, en este orden: copiar la URL, ver el pedido en Slack, `/deploy`, solicitar review,
+  acciones, en este orden: copiar la URL, ver el pedido en Slack, deploy, solicitar review,
   marcar un borrador listo para review (`gh pr ready`), pedir al agente (salvo cuando lo que
   falta es responder hilos de review), ver los logs de cada check fallido (menos docs-check) y
   sacarlo del grupo.
@@ -198,7 +198,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   `GH_PR_STATUS_REVIEWERS` y `GH_PR_STATUS_REVIEW_CHANNELS`; sin ellas, y con
   `GH_PR_STATUS_SLACK_CHANNEL`, el menú vuelve a copiar el link y abrir el canal. El
   comentario se escribe sin campo nativo: los acentos con tecla muerta no se componen.
-- **/deploy** comenta `/deploy` en el PR, como tu usuario de `gh`, para iniciar el
+- **Deploy** comenta `/deploy` en el PR, como tu usuario de `gh`, para iniciar el
   pipeline. Antes pregunta en el diálogo del sistema (enter confirma, escape cancela), y no
   aparece en borradores ni mientras hay un deploy en curso.
 - Las listas se recargan solas cada minuto; mientras alguno de tus PRs está desplegando,
