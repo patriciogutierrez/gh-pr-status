@@ -1613,13 +1613,7 @@ impl Root {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_x_scroll()
-                    // Only sideways deltas move the board; a vertical wheel
-                    // is for the column under the mouse, which would
-                    // otherwise scroll both. GPUI 0.2 has no setter for this.
-                    .map(|mut board| {
-                        board.style().restrict_scroll_to_axis = Some(true);
-                        board
-                    })
+                    .map(own_axis_only)
                     .children(columns),
             )
     }
@@ -1709,6 +1703,7 @@ impl Root {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_y_scroll()
+                    .map(own_axis_only)
                     .children(cards)
                     .when(!shipped.is_empty(), |this| {
                         this.child(
@@ -2210,6 +2205,15 @@ fn message(text: impl Into<SharedString>, color: u32) -> impl IntoElement {
         .text_sm()
         .text_color(rgb(color))
         .child(text.into())
+}
+
+/// Makes a scrollable area ignore wheel deltas on the other axis. By default
+/// GPUI turns a vertical wheel into sideways scrolling on a horizontal area
+/// and the reverse, so the board and the column under the mouse would both
+/// move on every wheel. GPUI 0.2 has no setter for this.
+fn own_axis_only<E: Styled>(mut element: E) -> E {
+    element.style().restrict_scroll_to_axis = Some(true);
+    element
 }
 
 /// The scrolling area both tabs draw into.
