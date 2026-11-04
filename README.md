@@ -183,8 +183,8 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   `GH_PR_STATUS_REVIEWERS`), urgencia (highest, high, medium, low), canal, comentario, y el
   link del PR ya puesto. «Enviar a Slack» (o enter) hace un `POST` al webhook del workflow de
   review del equipo, que publica el pedido con su botón «aprobar»; tú vas como requester. La
-  fila dice «review pedido hace N» hasta que el PR quede aprobado (solo mientras la app esté
-  abierta). Necesita `GH_PR_STATUS_REVIEW_WEBHOOK`, `GH_PR_STATUS_SLACK_USER`,
+  fila dice «review pedido hace N» hasta que el PR quede aprobado, y el menú deja de ofrecer
+  el pedido; se recuerda en `reviews.sqlite`, junto a los otros archivos locales. Necesita `GH_PR_STATUS_REVIEW_WEBHOOK`, `GH_PR_STATUS_SLACK_USER`,
   `GH_PR_STATUS_REVIEWERS` y `GH_PR_STATUS_REVIEW_CHANNELS`; sin ellas, y con
   `GH_PR_STATUS_SLACK_CHANNEL`, el menú vuelve a copiar el link y abrir el canal. El
   comentario se escribe sin campo nativo: los acentos con tecla muerta no se componen.

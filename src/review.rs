@@ -4,15 +4,18 @@
 //! requester, the channel, the urgency, a comment and the PR's link, and it
 //! posts the request with its "aprobar" button in the channel. Everything the
 //! form offers comes from `GH_PR_STATUS_*` variables, so the app holds no
-//! names or IDs of its own. The send blocks and runs on the background
-//! executor.
+//! names or IDs of its own. When each request was sent is kept in a local
+//! SQLite file, so the rows still say so after a restart. The send and the
+//! file block and run on the background executor.
 
+use std::collections::HashMap;
 use std::env;
 use std::process::Command;
 
+use rusqlite::{Connection, params};
 use serde_json::json;
 
-use crate::tool;
+use crate::{db, tool};
 
 /// The urgencies the workflow knows, as its stickers: the word shown, and
 /// what is sent.
@@ -109,6 +112,52 @@ pub fn send(config: &Config, request: &Request) -> Result<(), String> {
     }
 }
 
+/// When a review was last asked for, by PR URL, as seconds since the epoch.
+pub fn asked() -> Result<HashMap<String, i64>, String> {
+    read_asked(&open()?)
+}
+
+pub fn remember(url: &str, at: i64) -> Result<(), String> {
+    write_asked(&open()?, url, at)
+}
+
+fn read_asked(db: &Connection) -> Result<HashMap<String, i64>, String> {
+    let mut statement = db
+        .prepare("SELECT url, asked_at FROM requests")
+        .map_err(db_error)?;
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .and_then(|rows| rows.collect())
+        .map_err(db_error)
+}
+
+fn write_asked(db: &Connection, url: &str, at: i64) -> Result<(), String> {
+    db.execute(
+        "INSERT INTO requests (url, asked_at) VALUES (?1, ?2)
+         ON CONFLICT(url) DO UPDATE SET asked_at = excluded.asked_at",
+        params![url, at],
+    )
+    .map(drop)
+    .map_err(db_error)
+}
+
+fn open() -> Result<Connection, String> {
+    let db = db::open("reviews.sqlite")?;
+    migrate(&db)?;
+    Ok(db)
+}
+
+fn migrate(db: &Connection) -> Result<(), String> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS requests (url TEXT PRIMARY KEY, asked_at INTEGER NOT NULL);",
+    )
+    .map_err(db_error)
+}
+
+fn db_error(error: rusqlite::Error) -> String {
+    format!("Error de la base local de reviews: {error}")
+}
+
 fn payload(config: &Config, request: &Request) -> serde_json::Value {
     json!({
         "reviewer": request.reviewer,
@@ -140,6 +189,20 @@ mod tests {
                     id: "U2".to_string()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_request_is_remembered_and_asking_again_updates_it() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+
+        write_asked(&db, "https://github.com/acme/demo/pull/1", 100).unwrap();
+        write_asked(&db, "https://github.com/acme/demo/pull/1", 200).unwrap();
+
+        assert_eq!(
+            read_asked(&db).unwrap(),
+            HashMap::from([("https://github.com/acme/demo/pull/1".to_string(), 200)])
         );
     }
 
