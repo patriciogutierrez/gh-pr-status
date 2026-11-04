@@ -5,6 +5,7 @@
 //! the view hands these calls to the background executor, which is why nothing
 //! in this module touches GPUI.
 
+use std::collections::HashSet;
 use std::process::Command;
 
 use serde_json::Value;
@@ -13,12 +14,9 @@ use crate::pipeline::{Pipeline, Settings};
 use crate::tool;
 
 /// One search, one page. Fifty is more open PRs than anyone should have.
-///
-/// The latest comments carry the pipeline bot's report, but only the user's own
-/// PRs need them: on other people's PRs those comments run to hundreds of KB and
-/// turn a two-second search into a ten-second one.
+/// The latest comments carry the pipeline bot's report.
 const QUERY: &str = r#"
-query($search: String!, $withComments: Boolean!) {
+query($search: String!) {
   viewer { login }
   search(query: $search, type: ISSUE, first: 50) {
     nodes {
@@ -28,10 +26,13 @@ query($search: String!, $withComments: Boolean!) {
         author { login }
         repository { nameWithOwner }
         comments { totalCount }
-        recentComments: comments(last: 10) @include(if: $withComments) {
+        recentComments: comments(last: 10) {
           nodes { url updatedAt author { login } body }
         }
         latestReviews(first: 20) { nodes { state author { login } } }
+        reviewRequests(first: 10) {
+          nodes { requestedReviewer { ... on User { login } ... on Team { name } } }
+        }
         commits(last: 1) {
           nodes {
             commit {
@@ -39,8 +40,11 @@ query($search: String!, $withComments: Boolean!) {
                 state
                 contexts(first: 50) {
                   nodes {
-                    ... on CheckRun { name conclusion }
-                    ... on StatusContext { context state }
+                    ... on CheckRun {
+                      name conclusion detailsUrl title
+                      annotations(first: 10) { nodes { message annotationLevel } }
+                    }
+                    ... on StatusContext { context state targetUrl description }
                   }
                 }
               }
@@ -53,30 +57,8 @@ query($search: String!, $withComments: Boolean!) {
 }
 "#;
 
-/// Which list a tab shows.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Search {
-    /// Open PRs the user authored.
-    Mine,
-    /// Open PRs where someone asked the user for a review.
-    ReviewRequested,
-}
-
-impl Search {
-    fn query(self) -> &'static str {
-        match self {
-            Search::Mine => "is:pr is:open archived:false author:@me sort:updated-desc",
-            Search::ReviewRequested => {
-                "is:pr is:open archived:false review-requested:@me sort:updated-desc"
-            }
-        }
-    }
-
-    /// Whether the search also brings the pipeline bot's comments.
-    fn with_comments(self) -> bool {
-        self == Search::Mine
-    }
-}
+/// The user's open PRs, most recently updated first.
+const SEARCH: &str = "is:pr is:open archived:false author:@me sort:updated-desc";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Checks {
@@ -117,11 +99,12 @@ pub struct PullRequest {
     pub head: String,
     pub draft: bool,
     pub checks: Checks,
-    /// Names of the checks that failed, for the row's caption.
-    pub failing_checks: Vec<String>,
+    pub failing_checks: Vec<FailedCheck>,
     pub review: Review,
     /// Logins whose latest review approves the PR.
     pub approvers: Vec<String>,
+    /// Users and teams asked for a review who have not given it yet.
+    pub requested_reviewers: Vec<String>,
     pub mergeable: Mergeable,
     pub comments: u64,
     /// Seconds since the Unix epoch.
@@ -137,22 +120,30 @@ impl PullRequest {
     }
 }
 
+/// A check that failed on the PR's last commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailedCheck {
+    pub name: String,
+    /// Why it failed, when the check says more than its exit code.
+    pub reason: Option<String>,
+    /// Where its logs are.
+    pub url: Option<String>,
+}
+
 pub struct Snapshot {
     pub login: String,
     pub pulls: Vec<PullRequest>,
 }
 
 /// Runs the search through `gh api graphql`.
-pub fn fetch(search: Search) -> Result<Snapshot, String> {
+pub fn fetch() -> Result<Snapshot, String> {
     let stdout = gh(&[
         "api".to_string(),
         "graphql".to_string(),
         "-f".to_string(),
         format!("query={QUERY}"),
         "-f".to_string(),
-        format!("search={}", search.query()),
-        "-F".to_string(),
-        format!("withComments={}", search.with_comments()),
+        format!("search={SEARCH}"),
     ])?;
 
     let value: Value = serde_json::from_slice(&stdout)
@@ -173,7 +164,7 @@ pub fn comment(url: &str, body: &str) -> Result<(), String> {
 }
 
 /// Runs `gh` and returns its stdout, or an error worth showing as is.
-fn gh(args: &[String]) -> Result<Vec<u8>, String> {
+pub fn gh(args: &[String]) -> Result<Vec<u8>, String> {
     let output = Command::new(tool::path("gh"))
         .args(args)
         .output()
@@ -237,6 +228,7 @@ fn parse_pull(node: &Value) -> Option<PullRequest> {
         failing_checks: failing_checks(rollup),
         review: parse_review(node),
         approvers: approvers(node),
+        requested_reviewers: requested_reviewers(node),
         mergeable: match node["mergeable"].as_str() {
             Some("MERGEABLE") => Mergeable::Clean,
             Some("CONFLICTING") => Mergeable::Conflicting,
@@ -260,11 +252,13 @@ fn parse_checks(rollup: &Value) -> Checks {
     }
 }
 
-fn failing_checks(rollup: &Value) -> Vec<String> {
+/// Each failed check once: a re-run check shows up again under the same name.
+fn failing_checks(rollup: &Value) -> Vec<FailedCheck> {
     let Some(contexts) = rollup["contexts"]["nodes"].as_array() else {
         return Vec::new();
     };
 
+    let mut seen = HashSet::new();
     contexts
         .iter()
         .filter_map(|context| {
@@ -273,9 +267,35 @@ fn failing_checks(rollup: &Value) -> Vec<String> {
                 Some("FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE")
             ) || matches!(context["state"].as_str(), Some("FAILURE" | "ERROR"));
             let name = context["name"].as_str().or(context["context"].as_str())?;
-            failed.then(|| name.to_string())
+            (failed && seen.insert(name)).then(|| FailedCheck {
+                name: name.to_string(),
+                reason: failure_reason(context),
+                url: context["detailsUrl"]
+                    .as_str()
+                    .or(context["targetUrl"].as_str())
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_string),
+            })
         })
         .collect()
+}
+
+/// The first failure annotation that is not GitHub Actions' "Process completed
+/// with exit code N.", else the check's own title or description. Warnings and
+/// notices are about the runner, not about what broke.
+fn failure_reason(context: &Value) -> Option<String> {
+    let annotations = context["annotations"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten();
+    annotations
+        .filter(|annotation| annotation["annotationLevel"].as_str() == Some("FAILURE"))
+        .filter_map(|annotation| annotation["message"].as_str())
+        .find(|message| !message.starts_with("Process completed with exit code"))
+        .or(context["title"].as_str())
+        .or(context["description"].as_str())
+        .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+        .map(str::to_string)
 }
 
 fn approvers(node: &Value) -> Vec<String> {
@@ -287,6 +307,21 @@ fn approvers(node: &Value) -> Vec<String> {
         .iter()
         .filter(|review| review["state"].as_str() == Some("APPROVED"))
         .filter_map(|review| review["author"]["login"].as_str().map(str::to_string))
+        .collect()
+}
+
+fn requested_reviewers(node: &Value) -> Vec<String> {
+    let Some(requests) = node["reviewRequests"]["nodes"].as_array() else {
+        return Vec::new();
+    };
+
+    requests
+        .iter()
+        .filter_map(|request| {
+            let reviewer = &request["requestedReviewer"];
+            reviewer["login"].as_str().or(reviewer["name"].as_str())
+        })
+        .map(str::to_string)
         .collect()
 }
 
@@ -390,8 +425,53 @@ mod tests {
         ))
         .unwrap();
 
+        let names: Vec<_> = pull
+            .failing_checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect();
+
         assert_eq!(pull.checks, Checks::Failing);
-        assert_eq!(pull.failing_checks, vec!["tests", "deploy"]);
+        assert_eq!(names, vec!["tests", "deploy"]);
+    }
+
+    #[test]
+    fn a_failed_check_explains_itself_past_the_exit_code() {
+        let rollup = json!({ "state": "FAILURE", "contexts": { "nodes": [
+            {
+                "name": "tests",
+                "conclusion": "FAILURE",
+                "detailsUrl": "https://github.com/acme/payments/actions/runs/1",
+                "annotations": { "nodes": [
+                    { "message": "The ubuntu-latest label will migrate", "annotationLevel": "WARNING" },
+                    { "message": "Process completed with exit code 1.", "annotationLevel": "FAILURE" },
+                    { "message": "\nAssertionError: expected 2\nmore", "annotationLevel": "FAILURE" }
+                ]}
+            },
+            { "name": "tests", "conclusion": "FAILURE" },
+            { "context": "deploy", "state": "ERROR", "description": "Build failed", "targetUrl": "" }
+        ]}});
+
+        let pull = parse_pull(&node(
+            json!({ "commits": { "nodes": [{ "commit": { "statusCheckRollup": rollup } }] } }),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            pull.failing_checks,
+            vec![
+                FailedCheck {
+                    name: "tests".to_string(),
+                    reason: Some("AssertionError: expected 2".to_string()),
+                    url: Some("https://github.com/acme/payments/actions/runs/1".to_string()),
+                },
+                FailedCheck {
+                    name: "deploy".to_string(),
+                    reason: Some("Build failed".to_string()),
+                    url: None,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -414,6 +494,19 @@ mod tests {
         let pull = parse_pull(&node(json!({ "latestReviews": reviews }))).unwrap();
 
         assert_eq!(pull.approvers, ["ana"]);
+    }
+
+    #[test]
+    fn lists_who_still_has_to_review() {
+        let requests = json!({ "nodes": [
+            { "requestedReviewer": { "login": "carla" } },
+            { "requestedReviewer": { "name": "payments-cl" } },
+            { "requestedReviewer": {} }
+        ]});
+
+        let pull = parse_pull(&node(json!({ "reviewRequests": requests }))).unwrap();
+
+        assert_eq!(pull.requested_reviewers, ["carla", "payments-cl"]);
     }
 
     #[test]
@@ -452,7 +545,7 @@ mod tests {
             return;
         }
 
-        let snapshot = fetch(Search::Mine).unwrap();
+        let snapshot = fetch().unwrap();
 
         assert!(!snapshot.login.is_empty());
         assert!(snapshot.pulls.iter().all(|pull| pull.updated_at > 0));

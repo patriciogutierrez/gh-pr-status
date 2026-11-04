@@ -7,17 +7,13 @@ notificaciones de macOS cuando un deploy avanza o falla y cuando te aprueban un 
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│ Pull requests                          [Actualizar]  │
-│ @octocat · actualizado hace 2 min                    │
-│ [Mis PRs (5)] [Me piden review (3)]                  │
-│ ┌──────────┐┌──────────┐┌──────────┐┌──────────┐     │
-│ │ 2        ││ 1        ││ 2        ││ 0        │     │
-│ │ Atención ││ Listos   ││ Esperando││ Borrador │     │
-│ └──────────┘└──────────┘└──────────┘└──────────┘     │
+│ [Mis PRs (5)] [Mergeadas]   actualizado…     [Actua]│
+│ 2 atención  1 listos  2 esperando  0 borradores      │
 │ NECESITAN TU ATENCIÓN 2                              │
-│ ▌ payments #539 · master ← feat/…        hace 2 h    │
+│ ▌ payments #539 · master ← feat/…  hace 2 h [/deploy]│
 │ ▌ Registrar la redirección del formulario…           │
-│ ▌ [✗ CI] [Aprobado] [💬 2]  falla: tests             │
+│ ▌ [✗ CI] [Aprobado por @ana] [💬 2]                  │
+│ ▌ ✗ tests   AssertionError: expected 2               │
 │ ▌ ▸ [✗ Deploy falló] [pre-prod ✗] 🚨 Falló el read…  │
 │ LISTOS PARA MERGE 1                                  │
 │ ▌ …                                                  │
@@ -52,6 +48,7 @@ de deploy** (ver [El pipeline](#el-pipeline)):
 | `GH_PR_STATUS_GCP_PROD` | Proyecto de GCP de prod | `acme-prod` |
 | `GH_PR_STATUS_GCP_DEVELOPMENT` | Proyecto de GCP de development | `acme-dev` |
 | `GH_PR_STATUS_SLACK_CHANNEL` | ID del canal de Slack donde inicias tu workflow (por ejemplo, pedir review). Agrega un botón "Slack" al lado de cada PR | `C0123456789` |
+| `GH_PR_STATUS_CODE_DIR` | Dónde están clonados los repos que lee el agente de cada grupo. Por defecto, `~/code` | `~/code` |
 | `GH_PR_STATUS_SLACK_TEAM` | ID del workspace de Slack (`T…`, aparece en `app.slack.com/client/<id>/…`). Con él el canal se abre directo en la app de Slack; sin él pasa por el navegador | `T0123456789` |
 
 Los proyectos de GCP solo sirven para saber en qué ambiente falló un deploy cuando el
@@ -110,9 +107,50 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   - **Listos para merge:** aprobado, CI verde y sin conflictos.
   - **Esperando CI o review:** CI corriendo, falta review, o GitHub todavía no calcula si hay conflictos.
   - **Borradores.**
-- **Me piden review** lista los PRs abiertos donde alguien pidió tu review, con el autor.
+- **Mergeadas** lista tus PRs mergeados agrupados por día (Hoy, Ayer, «martes 13 oct»…), con
+  la hora del merge. El registro parte el lunes de la semana pasada y se guarda en
+  `~/Library/Application Support/gh-pr-status/merged.sqlite`: cada 5 minutos la app solo pide
+  a GitHub lo mergeado desde la última sincronización (normalmente, hoy). Si la búsqueda de
+  GitHub devuelve menos resultados de los que cuenta, guarda los que llegaron y vuelve a pedir
+  los mismos días en la siguiente. Muestra los últimos 60 días; los anteriores quedan en el
+  archivo. Borrarlo reinicia el registro.
+- **Grupos**, en la barra izquierda, para ordenar los PRs cuando son muchos. Arrastra una fila
+  (abierta o mergeada) a un grupo para moverla ahí, a «Sin grupo» para sacarla, o a
+  «+ Nuevo grupo» para crear uno con ella adentro. Al elegir un grupo, las dos pestañas
+  muestran solo sus PRs, y «Mis PRs» agrega al final sus mergeados, así ves en una sola vista
+  lo que falta y lo que ya salió. Clic derecho sobre un grupo para renombrarlo o eliminarlo
+  (sus PRs vuelven a «Sin grupo»). Un PR está en un solo grupo y se recuerda por su URL, así
+  que sigue ahí después de mergearse. Arrastra la línea entre la barra y los PRs para
+  cambiar su ancho, que se recuerda al reiniciar. Se guardan en
+  `~/Library/Application Support/gh-pr-status/groups.sqlite`. El nombre se escribe sin un
+  campo de texto nativo: los acentos con tecla muerta (´ + a) no se componen.
+- **Subgrupos**, un nivel bajo cada grupo: clic derecho sobre el grupo → «Nuevo subgrupo».
+  Al elegir el grupo ves sus PRs y los de todos sus subgrupos; al elegir un subgrupo, solo los
+  suyos. La flecha ▸/▾ a la izquierda de un grupo pliega sus subgrupos, y queda así al
+  reiniciar; un grupo plegado se marca como elegido cuando uno de sus subgrupos lo está.
+  Eliminar un grupo elimina también sus subgrupos. En «Mis PRs», un grupo con
+  subgrupos se ve como tablero: una columna por subgrupo (y «Sin subgrupo» primero, si el
+  grupo tiene PRs propios) con tarjetas compactas ordenadas por estado y sus mergeados
+  colapsados al final. Arrastra una tarjeta a otra columna para cambiarla de subgrupo. Las
+  columnas se desplazan hacia el lado con el trackpad o con la rueda; los botones Slack y
+  `/deploy` aparecen al pasar el mouse por la tarjeta.
+- **Un agente por grupo**, en [Orca](https://github.com/stablyai/orca). Con un grupo elegido,
+  el botón **Agente** (o clic derecho → «Abrir agente en Orca») abre una pestaña de Orca con
+  `claude --add-dir ~/code`, para conversar qué hay que hacer y en qué repos. La primera vez
+  crea la carpeta del grupo en `~/orca/groups/<grupo>/`, un repo git con un `CLAUDE.md` que
+  le explica al agente cómo trabajar, y la registra en Orca. Las siguientes vuelve a la misma
+  pestaña. El agente crea un worktree de Orca por repo, marcado con el grupo
+  (`--comment gh-pr-status:group=<id>`), y los PRs que salgan de esas ramas entran solos al
+  grupo. Si sacas uno a mano, no vuelve a entrar. Los subgrupos comparten el agente de su
+  grupo: la app mantiene en la carpeta del grupo un `subgrupos.md` con la marca de cada uno,
+  y el agente marca cada worktree con el subgrupo al que pertenece, así sus PRs caen ahí. Los repos se buscan en `~/code`, o en
+  `GH_PR_STATUS_CODE_DIR` si está definida. La primera vez, Claude Code pregunta si confías
+  en la carpeta del grupo. Al eliminar un grupo, su carpeta queda en disco y registrada en
+  Orca; sácala desde Orca.
 - Cada fila muestra repo, número, rama base y rama head, la última actualización, y
-  badges de CI, review y conflictos. Si el CI falla, muestra qué checks fallaron.
+  badges de CI, review y conflictos. El de review dice quién aprobó o a quién se le pidió
+  review. Si el CI falla, lista cada check fallido con el motivo (la primera anotación de
+  error que no sea el código de salida) y el clic en el check abre sus logs.
 - Si configuraste el bot, debajo de cada PR tuyo está su **último pipeline**: estado
   (desplegando, desplegado, falló, sin avances), la etapa actual o el primer error, y hace
   cuánto escribió el bot. **Clic en el pipeline** lo despliega: últimas 8 etapas con su
@@ -133,7 +171,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
 | --- | --- |
 | `cmd-r` | actualiza |
 | `cmd-1` | pestaña Mis PRs |
-| `cmd-2` | pestaña Me piden review |
+| `cmd-2` | pestaña Mergeadas |
 | `cmd-q` | sale |
 
 ### Notificaciones
@@ -179,14 +217,14 @@ Si tu bot usa otro formato, el parser está en `src/pipeline.rs`.
 
 ## Cuánto cuesta el polling
 
-Cada recarga es una llamada GraphQL por pestaña: 2 puntos la de tus PRs (pide los últimos
-comentarios, solo de tus PRs) y 1 la de reviews, de un presupuesto de 5.000 puntos por hora
-que comparten todas tus herramientas que usan `gh`.
+Cada recarga de tus PRs es una llamada GraphQL de 2 puntos (pide los últimos comentarios),
+de un presupuesto de 5.000 puntos por hora que comparten todas tus herramientas que usan `gh`. La de mergeadas cuesta 1 punto cada 5
+minutos (~12 por hora).
 
 | Situación | Puntos por hora | % del límite |
 | --- | --- | --- |
-| Sin despliegues (todo cada 60 s) | ~180 | ~4 % |
-| Con un despliegue en curso ("Mis PRs" cada 20 s) | ~420 | ~8 % |
+| Sin despliegues (todo cada 60 s) | ~130 | ~3 % |
+| Con un despliegue en curso ("Mis PRs" cada 20 s) | ~370 | ~7 % |
 
 El estado de review sale de `reviewDecision`, que solo existe cuando el branch protection
 exige reviews; si no, la app usa la última review de cada revisor.
@@ -210,13 +248,17 @@ cargo clippy --all-targets
 
 | Archivo | Contenido |
 | --- | --- |
-| `src/main.rs` | La vista `Root`: pestañas, resumen, secciones, filas y recarga periódica |
+| `src/main.rs` | La vista `Root`: encabezado, contadores, secciones, filas y recarga periódica |
 | `src/github.rs` | La consulta GraphQL vía `gh`, el parseo de la respuesta y las fechas |
 | `src/pipeline.rs` | La configuración del bot y el parseo de sus comentarios: etapas, horas, errores y estado |
+| `src/folders.rs` | Los grupos de PRs y a cuál pertenece cada uno, en SQLite |
+| `src/orca.rs` | El agente de cada grupo en Orca y los worktrees marcados con su grupo |
+| `src/db.rs` | Dónde se abren los archivos SQLite locales |
+| `src/merged.rs` | Los PRs mergeados: la búsqueda en GitHub, el registro en SQLite y los días en hora local |
 | `src/notify.rs` | Detecta hitos de deploy y PRs aprobados, y manda la notificación de macOS |
 | `src/tool.rs` | Encuentra `gh` y los notificadores aunque la app no herede el `PATH` del shell |
 | `src/status.rs` | En qué grupo cae un PR, sus badges y el "hace N min" |
-| `src/ui.rs` | Botones, pestañas, badges y contadores compartidos |
+| `src/ui.rs` | Botones, pestañas y badges compartidos |
 | `src/theme.rs` | Colores (Catppuccin Mocha) |
 | `scripts/bundle.sh` | Compila en release y arma el `.app` |
 

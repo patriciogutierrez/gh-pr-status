@@ -54,6 +54,16 @@ impl Group {
         }
     }
 
+    /// The group's name in the one-line summary above the list.
+    pub fn short(self) -> &'static str {
+        match self {
+            Group::Attention => "atención",
+            Group::Ready => "listos",
+            Group::Waiting => "esperando",
+            Group::Draft => "borradores",
+        }
+    }
+
     pub fn color(self) -> u32 {
         match self {
             Group::Attention => theme::RED,
@@ -80,6 +90,13 @@ pub fn badges(pull: &PullRequest) -> Vec<Badge> {
             color,
         })
     };
+    let names = |logins: &[String]| {
+        logins
+            .iter()
+            .map(|login| format!("@{login}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
 
     match pull.checks {
         Checks::Passing => push("✓ CI", theme::GREEN),
@@ -88,10 +105,18 @@ pub fn badges(pull: &PullRequest) -> Vec<Badge> {
         Checks::Missing => {}
     }
     match pull.review {
+        Review::Approved if !pull.approvers.is_empty() => push(
+            &format!("Aprobado por {}", names(&pull.approvers)),
+            theme::GREEN,
+        ),
         Review::Approved => push("Aprobado", theme::GREEN),
         Review::ChangesRequested => push("Cambios pedidos", theme::RED),
+        Review::Required | Review::Missing if !pull.requested_reviewers.is_empty() => push(
+            &format!("Esperando a {}", names(&pull.requested_reviewers)),
+            theme::YELLOW,
+        ),
         Review::Required => push("Falta review", theme::YELLOW),
-        Review::Missing => push("Sin reviews", theme::MUTED),
+        Review::Missing => {}
     }
     if pull.mergeable == Mergeable::Conflicting {
         push("Conflictos", theme::RED);
@@ -168,6 +193,7 @@ mod tests {
             failing_checks: Vec::new(),
             review: Review::Approved,
             approvers: Vec::new(),
+            requested_reviewers: Vec::new(),
             mergeable: Mergeable::Clean,
             comments: 0,
             updated_at: 0,
@@ -250,6 +276,36 @@ mod tests {
         };
 
         assert_eq!(Group::of(&draft, 0), Group::Draft);
+    }
+
+    #[test]
+    fn the_review_badge_names_who_approved_or_who_is_pending() {
+        let approved = PullRequest {
+            approvers: vec!["ana".to_string(), "beto".to_string()],
+            ..pull()
+        };
+        let pending = PullRequest {
+            review: Review::Required,
+            requested_reviewers: vec!["carla".to_string()],
+            ..pull()
+        };
+        let unasked = PullRequest {
+            review: Review::Missing,
+            ..pull()
+        };
+        let label = |pull: &PullRequest| {
+            badges(pull)
+                .into_iter()
+                .map(|badge| badge.label)
+                .find(|label| label != "✓ CI")
+        };
+
+        assert_eq!(
+            label(&approved).as_deref(),
+            Some("Aprobado por @ana, @beto")
+        );
+        assert_eq!(label(&pending).as_deref(), Some("Esperando a @carla"));
+        assert_eq!(label(&unasked), None);
     }
 
     #[test]

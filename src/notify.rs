@@ -241,6 +241,7 @@ mod tests {
             failing_checks: Vec::new(),
             review: Review::Approved,
             approvers: vec!["ana".to_string()],
+            requested_reviewers: Vec::new(),
             mergeable: Mergeable::Clean,
             comments: 0,
             updated_at: NOW,

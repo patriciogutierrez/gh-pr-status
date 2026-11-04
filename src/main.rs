@@ -1,16 +1,22 @@
 //! A GPUI window over the user's open pull requests on GitHub.
 //!
 //! Two tabs: the PRs the user authored, grouped by what they are waiting on,
-//! and the PRs where someone asked the user for a review. Under each of the
-//! user's PRs sits the latest CI/CD run as the pipeline bot reports it.
+//! and the user's merged PRs. Under each of the user's PRs sits the latest CI/CD run as the pipeline
+//! bot reports it. A sidebar holds the groups the user drags PRs into; picking
+//! one narrows every tab to it. Each group can open an agent in Orca, and the
+//! PRs from the worktrees that agent makes join the group on their own.
 //!
-//! Both lists reload every minute; while one of the user's deploys is running,
+//! The open PRs reload every minute; while one of the user's deploys is running,
 //! "Mis PRs" reloads every 20 seconds so the run can be followed live. macOS
 //! notifications announce when a deploy finishes or fails and when a PR is
 //! approved.
 
+mod db;
+mod folders;
 mod github;
+mod merged;
 mod notify;
+mod orca;
 mod pipeline;
 mod status;
 mod theme;
@@ -23,22 +29,26 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    App, Application, Bounds, ClipboardItem, Context, FocusHandle, Focusable, KeyBinding,
-    MouseButton, MouseDownEvent, Pixels, Point, SharedString, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, actions, anchored, deferred, div, prelude::*, px, rgb, size,
+    AnimationExt, App, Application, Bounds, ClipboardItem, Context, FocusHandle, Focusable,
+    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, anchored, deferred, div,
+    prelude::*, px, rgb, size,
 };
 
-use github::{PullRequest, Review, Search, Snapshot};
+use github::{PullRequest, Review, Snapshot};
 use pipeline::{Pipeline, State};
 use status::Group;
 
-actions!(app, [Refresh, ShowMine, ShowReviews, Quit]);
+actions!(app, [Refresh, ShowMine, ShowMerged, Quit]);
 
 /// How often the lists reload without being asked. Each reload is one GraphQL
 /// call per tab, one or two points of GitHub's 5,000-point hourly budget.
 const REFRESH_EVERY: Duration = Duration::from_secs(60);
 /// How often "Mis PRs" reloads while one of the user's deploys is running.
 const DEPLOY_REFRESH_EVERY: Duration = Duration::from_secs(20);
+/// How often the merged list asks GitHub for today's merges; past days come
+/// from the local file.
+const MERGED_REFRESH_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How often the clock wakes up to check what is due and repaint the
 /// relative times.
 const TICK: Duration = Duration::from_secs(5);
@@ -48,6 +58,29 @@ const RECENT_STEPS: usize = 8;
 const DEPLOY_COMMAND: &str = "/deploy";
 /// How long the deploy button waits for the confirming second click.
 const CONFIRM_FOR: Duration = Duration::from_secs(5);
+/// The sidebar's width until the user drags its edge, and how far it goes.
+const SIDEBAR_WIDTH: f32 = 180.;
+const SIDEBAR_MIN: f32 = 140.;
+const SIDEBAR_MAX: f32 = 480.;
+/// The strip between the sidebar and the PRs that resizes the sidebar.
+const HANDLE_WIDTH: f32 = 16.;
+/// The room a sidebar entry's count takes; with padding, border and gap it
+/// leaves the rest of the sidebar's width to the name.
+const COUNT_WIDTH: f32 = 20.;
+const ENTRY_CHROME: f32 = 2. * 8. + 2. + 8. + COUNT_WIDTH;
+/// The room a group's fold arrow takes, with the gap after it.
+const FOLD_WIDTH: f32 = 12. + 8.;
+/// How far a subgroup sits in from its group, past the group's arrow.
+const SUBGROUP_INDENT: f32 = FOLD_WIDTH + 6.;
+/// How wide each column of a group's board is.
+const BOARD_COLUMN: f32 = 300.;
+/// A hovered name that doesn't fit waits `MARQUEE_WAIT`, slides left at
+/// `MARQUEE_SPEED` pixels a second until its end shows, holds `MARQUEE_HOLD`,
+/// slides back in `MARQUEE_RETURN`, and starts over.
+const MARQUEE_SPEED: f32 = 30.;
+const MARQUEE_WAIT: f32 = 1.;
+const MARQUEE_HOLD: f32 = 2.;
+const MARQUEE_RETURN: f32 = 0.4;
 
 /// Where the "Slack" button next to each PR goes: the channel in
 /// `GH_PR_STATUS_SLACK_CHANNEL`, straight in the Slack app when
@@ -81,10 +114,86 @@ enum Deploy {
     Failed(String),
 }
 
-/// The menu a right click on a PR opens, where the click happened.
+/// What a right click opened its menu on.
+#[derive(Clone)]
+enum MenuFor {
+    Pull(String),
+    Folder(i64),
+}
+
+/// The menu a right click opens, where the click happened.
 struct Menu {
-    url: String,
+    target: MenuFor,
     at: Point<Pixels>,
+}
+
+/// Which PRs the sidebar lets through to the tabs.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Filter {
+    All,
+    /// The PRs in no group.
+    Loose,
+    Folder(i64),
+}
+
+/// A group name being typed in the sidebar.
+struct Editor {
+    target: Editing,
+    text: String,
+}
+
+enum Editing {
+    /// A new group, which gets `pull` once created when it was started by
+    /// dropping that PR on "Nuevo grupo"; a subgroup of `parent` when it has one.
+    New {
+        pull: Option<String>,
+        parent: Option<i64>,
+    },
+    Rename(i64),
+}
+
+/// What the handle carries while the sidebar's edge is dragged. It draws
+/// nothing; the sidebar itself follows the cursor.
+struct ResizeSidebar;
+
+impl Render for ResizeSidebar {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// What a PR row carries while it is dragged onto a group.
+#[derive(Clone)]
+struct Dragged {
+    url: String,
+    title: SharedString,
+}
+
+/// The chip that follows the cursor while a PR is dragged.
+struct DragPreview {
+    title: SharedString,
+    /// Where the cursor grabbed the row, from the row's corner.
+    at: Point<Pixels>,
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().pl(self.at.x).pt(self.at.y).child(
+            div()
+                .max_w(px(280.))
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(theme::ACCENT))
+                .bg(rgb(theme::SURFACE_ACTIVE))
+                .text_xs()
+                .text_color(rgb(theme::TEXT))
+                .shadow_md()
+                .truncate()
+                .child(self.title.clone()),
+        )
+    }
 }
 
 /// What a tab last got back from `gh`.
@@ -94,18 +203,16 @@ enum Load {
     Failed(String),
 }
 
-/// One tab's data and the bookkeeping to reload it on its own schedule.
+/// The open PRs and the bookkeeping to reload them on their own schedule.
 struct Feed {
-    search: Search,
     load: Load,
     in_flight: bool,
     fetched_at: Option<Instant>,
 }
 
 impl Feed {
-    fn new(search: Search) -> Self {
+    fn new() -> Self {
         Self {
-            search,
             load: Load::Loading,
             in_flight: false,
             fetched_at: None,
@@ -119,7 +226,7 @@ impl Feed {
         }
     }
 
-    /// How many of this tab's PRs have a deploy in progress.
+    /// How many of the PRs have a deploy in progress.
     fn deploying(&self, now: i64) -> usize {
         self.pulls()
             .iter()
@@ -144,10 +251,36 @@ impl Feed {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Tab {
+    Mine,
+    Merged,
+}
+
+/// The merged PRs as stored locally, and how the last sync went.
+#[derive(Default)]
+struct MergedFeed {
+    /// `None` until the local file has been read once.
+    pulls: Option<Vec<merged::Merged>>,
+    /// Why the last sync or read failed; the stored rows are still shown.
+    error: Option<String>,
+    in_flight: bool,
+    fetched_at: Option<Instant>,
+}
+
+impl MergedFeed {
+    fn due(&self) -> bool {
+        !self.in_flight
+            && self
+                .fetched_at
+                .is_none_or(|at| at.elapsed() >= MERGED_REFRESH_EVERY)
+    }
+}
+
 struct Root {
-    tab: Search,
+    tab: Tab,
     mine: Feed,
-    reviews: Feed,
+    merged: MergedFeed,
     /// PRs whose pipeline is unfolded, by URL so it survives reloads.
     expanded: HashSet<String>,
     /// Each PR's review and pipeline as of the last load, to notice what changed.
@@ -157,22 +290,48 @@ struct Root {
     deploys: HashMap<String, Deploy>,
     /// The right-click menu, while it is open.
     menu: Option<Menu>,
+    /// The user's groups as stored locally.
+    folders: folders::Folders,
+    /// Why reading or saving the groups last failed.
+    folders_error: Option<String>,
+    filter: Filter,
+    editor: Option<Editor>,
+    /// The sidebar entry under the mouse, whose name scrolls if it is cut.
+    hovered: Option<Filter>,
+    sidebar_width: f32,
+    /// The group whose agent is being opened in Orca.
+    opening_agent: Option<i64>,
+    /// The board card under the mouse, which shows its buttons.
+    hovered_card: Option<String>,
+    /// Board columns whose merged PRs are unfolded.
+    merged_open: HashSet<i64>,
     focus_handle: FocusHandle,
 }
 
 impl Root {
     fn new(cx: &mut Context<Self>) -> Self {
         let root = Self {
-            tab: Search::Mine,
-            mine: Feed::new(Search::Mine),
-            reviews: Feed::new(Search::ReviewRequested),
+            tab: Tab::Mine,
+            mine: Feed::new(),
+            merged: MergedFeed::default(),
             expanded: HashSet::new(),
             last_seen: None,
             deploys: HashMap::new(),
             menu: None,
+            folders: folders::Folders::default(),
+            folders_error: None,
+            filter: Filter::All,
+            editor: None,
+            hovered: None,
+            sidebar_width: SIDEBAR_WIDTH,
+            opening_agent: None,
+            hovered_card: None,
+            merged_open: HashSet::new(),
             focus_handle: cx.focus_handle(),
         };
         root.start_clock(cx);
+        Self::load_folders(cx);
+        Self::load_sidebar_width(cx);
         root
     }
 
@@ -184,10 +343,11 @@ impl Root {
                 let alive = this
                     .update(cx, |this, cx| {
                         let now = now();
-                        for search in [Search::Mine, Search::ReviewRequested] {
-                            if this.feed(search).due(now) {
-                                this.reload(search, cx);
-                            }
+                        if this.mine.due(now) {
+                            this.reload(cx);
+                        }
+                        if this.merged.due() {
+                            this.reload_merged(cx);
                         }
                         cx.notify();
                     })
@@ -202,27 +362,49 @@ impl Root {
         .detach();
     }
 
-    fn feed(&self, search: Search) -> &Feed {
-        match search {
-            Search::Mine => &self.mine,
-            Search::ReviewRequested => &self.reviews,
-        }
-    }
-
-    fn feed_mut(&mut self, search: Search) -> &mut Feed {
-        match search {
-            Search::Mine => &mut self.mine,
-            Search::ReviewRequested => &mut self.reviews,
-        }
-    }
-
     fn refresh(&mut self, _: &Refresh, cx: &mut Context<Self>) {
-        self.reload(Search::Mine, cx);
-        self.reload(Search::ReviewRequested, cx);
+        self.reload(cx);
+        self.reload_merged(cx);
     }
 
-    fn reload(&mut self, search: Search, cx: &mut Context<Self>) {
-        let feed = self.feed_mut(search);
+    /// Syncs today's merges into the local file, then reads it back. A failed
+    /// sync still shows what is stored.
+    fn reload_merged(&mut self, cx: &mut Context<Self>) {
+        if self.merged.in_flight {
+            return;
+        }
+        self.merged.in_flight = true;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let (pulls, error) = cx
+                .background_executor()
+                .spawn(async move {
+                    let synced = merged::sync();
+                    match merged::load() {
+                        Ok(pulls) => (Some(pulls), synced.err()),
+                        Err(error) => (None, Some(error)),
+                    }
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                let feed = &mut this.merged;
+                if pulls.is_some() {
+                    feed.pulls = pulls;
+                }
+                feed.error = error;
+                feed.in_flight = false;
+                feed.fetched_at = Some(Instant::now());
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        let feed = &mut self.mine;
         if feed.in_flight {
             return;
         }
@@ -230,16 +412,20 @@ impl Root {
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let result = cx
+            let (result, worktrees) = cx
                 .background_executor()
-                .spawn(async move { github::fetch(search) })
+                .spawn(async move { (github::fetch(), orca::worktrees()) })
                 .await;
 
             this.update(cx, |this, cx| {
-                if let (Search::Mine, Ok(snapshot)) = (search, &result) {
+                if let Ok(snapshot) = &result {
                     this.notify_changes(&snapshot.pulls, cx);
+                    // Without Orca there are no worktrees, and nothing to claim.
+                    if let Ok(worktrees) = worktrees {
+                        this.claim(&snapshot.pulls, &worktrees, cx);
+                    }
                 }
-                let feed = this.feed_mut(search);
+                let feed = &mut this.mine;
                 feed.load = into_load(result);
                 feed.in_flight = false;
                 feed.fetched_at = Some(Instant::now());
@@ -261,7 +447,63 @@ impl Root {
         }
     }
 
-    fn show(&mut self, tab: Search, cx: &mut Context<Self>) {
+    /// Puts each new PR from a group's worktree in that group.
+    fn claim(
+        &mut self,
+        pulls: &[PullRequest],
+        worktrees: &[orca::Worktree],
+        cx: &mut Context<Self>,
+    ) {
+        for (url, id) in orca::claims(pulls, worktrees, &self.folders) {
+            self.folders.by_url.insert(url.clone(), id);
+            self.folders.claimed.insert(url.clone());
+            self.save(cx, move || folders::claim(&url, id));
+        }
+    }
+
+    /// Opens the group's agent in Orca, or goes back to the one already open.
+    /// A subgroup opens its group's.
+    fn open_agent(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(folder) = self.folders.root(id).cloned() else {
+            return;
+        };
+        let subgroups = self.subgroups(folder.id);
+        if self.opening_agent.is_some() {
+            return;
+        }
+        self.opening_agent = Some(id);
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { orca::open_agent(&folder, &subgroups) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.opening_agent = None;
+                this.folders_error = result.err();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn subgroups(&self, id: i64) -> Vec<folders::Folder> {
+        self.folders.children(id).cloned().collect()
+    }
+
+    /// Tells the agent of `id`'s group about its subgroups as they are now.
+    fn sync_subgroups(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(folder) = self.folders.root(id).cloned() else {
+            return;
+        };
+        let subgroups = self.subgroups(folder.id);
+        self.save(cx, move || orca::sync_subgroups(&folder, &subgroups));
+    }
+
+    fn show(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;
         cx.notify();
     }
@@ -269,6 +511,272 @@ impl Root {
     fn toggle(&mut self, url: &str, cx: &mut Context<Self>) {
         if !self.expanded.remove(url) {
             self.expanded.insert(url.to_string());
+        }
+        cx.notify();
+    }
+
+    /// Reads the groups from disk, replacing whatever is in memory.
+    fn load_folders(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { folders::load() })
+                .await;
+
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(loaded) => {
+                        if let Filter::Folder(id) = this.filter
+                            && !loaded.list.iter().any(|folder| folder.id == id)
+                        {
+                            this.filter = Filter::All;
+                        }
+                        this.folders = loaded;
+                    }
+                    Err(error) => this.folders_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn load_sidebar_width(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { folders::sidebar_width() })
+                .await;
+
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(Some(width)) => this.sidebar_width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+                    Ok(None) => {}
+                    Err(error) => this.folders_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Follows the cursor while the sidebar's edge is dragged; `left` is where
+    /// the sidebar starts.
+    fn resize_sidebar(&mut self, cursor: Pixels, left: Pixels, cx: &mut Context<Self>) {
+        let width = (f32::from(cursor - left) - HANDLE_WIDTH / 2.).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        if width != self.sidebar_width {
+            self.sidebar_width = width;
+            cx.notify();
+        }
+    }
+
+    /// The strip between the sidebar and the PRs. Dragging it resizes the
+    /// sidebar; the width is saved once it is let go.
+    fn sidebar_handle(&self) -> impl IntoElement {
+        div()
+            .id("sidebar-handle")
+            .group("sidebar-handle")
+            .flex()
+            .justify_center()
+            .w(px(HANDLE_WIDTH))
+            .flex_shrink_0()
+            .cursor(gpui::CursorStyle::ResizeLeftRight)
+            .on_drag(ResizeSidebar, |_, _, _, cx| cx.new(|_| ResizeSidebar))
+            .child(
+                div()
+                    .w(px(1.))
+                    .h_full()
+                    .group_hover("sidebar-handle", |style| style.bg(rgb(theme::BORDER))),
+            )
+    }
+
+    /// Writes a change already made in memory. If it fails, the error shows in
+    /// the sidebar and the groups are read back so the window matches the disk.
+    fn save(
+        &mut self,
+        cx: &mut Context<Self>,
+        write: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { write() }).await;
+
+            this.update(cx, |this, cx| {
+                this.folders_error = result.err();
+                if this.folders_error.is_some() {
+                    Self::load_folders(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Whether the sidebar's filter lets the PR at `url` through.
+    fn shows(&self, url: &str) -> bool {
+        match self.filter {
+            Filter::All => true,
+            Filter::Loose => !self.folders.by_url.contains_key(url),
+            Filter::Folder(id) => self
+                .folders
+                .by_url
+                .get(url)
+                .is_some_and(|member| self.folders.includes(id, *member)),
+        }
+    }
+
+    fn select(&mut self, filter: Filter, cx: &mut Context<Self>) {
+        self.filter = filter;
+        cx.notify();
+    }
+
+    /// Puts the PR at `url` in `folder`, or in none.
+    fn move_to(&mut self, url: &str, folder: Option<i64>, cx: &mut Context<Self>) {
+        if self.folders.by_url.get(url).copied() == folder {
+            return;
+        }
+        match folder {
+            Some(id) => self.folders.by_url.insert(url.to_string(), id),
+            None => self.folders.by_url.remove(url),
+        };
+        let url = url.to_string();
+        self.save(cx, move || folders::assign(&url, folder));
+    }
+
+    /// Folds or unfolds the group's subgroups in the sidebar.
+    fn toggle_fold(&mut self, id: i64, cx: &mut Context<Self>) {
+        if !self.folders.collapsed.remove(&id) {
+            self.folders.collapsed.insert(id);
+        }
+        let collapsed = self.folders.collapsed.clone();
+        self.save(cx, move || folders::save_collapsed(&collapsed));
+        cx.notify();
+    }
+
+    fn start_editing(&mut self, target: Editing, cx: &mut Context<Self>) {
+        if let Editing::New {
+            parent: Some(parent),
+            ..
+        } = target
+            && self.folders.collapsed.contains(&parent)
+        {
+            self.toggle_fold(parent, cx);
+        }
+        let text = match &target {
+            Editing::Rename(id) => self
+                .folders
+                .list
+                .iter()
+                .find(|folder| folder.id == *id)
+                .map(|folder| folder.name.clone())
+                .unwrap_or_default(),
+            Editing::New { .. } => String::new(),
+        };
+        self.editor = Some(Editor { target, text });
+        cx.notify();
+    }
+
+    /// Typing into the group name: enter saves it, escape drops it. Without a
+    /// platform text field there is no IME, so dead-key accents don't compose.
+    fn edit_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        let keystroke = &event.keystroke;
+        match keystroke.key.as_str() {
+            "enter" => self.finish_editing(cx),
+            "escape" => self.editor = None,
+            "backspace" => {
+                editor.text.pop();
+            }
+            _ if keystroke.modifiers.platform || keystroke.modifiers.control => return,
+            _ => match &keystroke.key_char {
+                Some(typed) if !typed.chars().any(char::is_control) => {
+                    editor.text.push_str(typed);
+                }
+                _ => return,
+            },
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Saves the name being typed. A blank one changes nothing.
+    fn finish_editing(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.take() else {
+            return;
+        };
+        cx.notify();
+        let name = editor.text.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+
+        match editor.target {
+            Editing::Rename(id) => {
+                if let Some(folder) = self.folders.list.iter_mut().find(|folder| folder.id == id) {
+                    folder.name = name.clone();
+                }
+                self.save(cx, move || folders::rename(id, &name));
+                self.sync_subgroups(id, cx);
+            }
+            Editing::New { pull, parent } => {
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { folders::create(&name, parent) })
+                        .await;
+
+                    this.update(cx, |this, cx| {
+                        match result {
+                            Ok(folder) => {
+                                let id = folder.id;
+                                this.folders.list.push(folder);
+                                if parent.is_some() {
+                                    this.sync_subgroups(id, cx);
+                                }
+                                match pull {
+                                    Some(url) => this.move_to(&url, Some(id), cx),
+                                    None => this.filter = Filter::Folder(id),
+                                }
+                            }
+                            Err(error) => this.folders_error = Some(error),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Removes the group and its subgroups; their PRs go back to "Sin grupo".
+    fn delete_folder(&mut self, id: i64, cx: &mut Context<Self>) {
+        let parent = self.folders.get(id).and_then(|folder| folder.parent);
+        let gone: HashSet<i64> = self
+            .folders
+            .list
+            .iter()
+            .filter(|folder| self.folders.includes(id, folder.id))
+            .map(|folder| folder.id)
+            .collect();
+        self.folders
+            .list
+            .retain(|folder| !gone.contains(&folder.id));
+        self.folders
+            .by_url
+            .retain(|_, folder| !gone.contains(folder));
+        if let Filter::Folder(selected) = self.filter
+            && gone.contains(&selected)
+        {
+            self.filter = Filter::All;
+        }
+        self.save(cx, move || folders::delete(id));
+        if let Some(parent) = parent {
+            self.sync_subgroups(parent, cx);
         }
         cx.notify();
     }
@@ -303,7 +811,7 @@ impl Root {
                 match result {
                     Ok(()) => {
                         this.deploys.remove(&url);
-                        this.reload(Search::Mine, cx);
+                        this.reload(cx);
                     }
                     Err(error) => {
                         this.deploys.insert(url, Deploy::Failed(error));
@@ -321,7 +829,8 @@ impl Root {
     /// on the user's own PRs.
     fn actions(&self, pull: &PullRequest, cx: &mut Context<Self>) -> impl IntoElement {
         let mine = pull.author == self.login().unwrap_or_default();
-        let slack = slack_channel().filter(|_| mine && pull.review != Review::Approved);
+        let slack =
+            slack_channel().filter(|_| mine && !pull.draft && pull.review != Review::Approved);
         let deploying = pull
             .pipeline
             .as_ref()
@@ -337,7 +846,7 @@ impl Root {
         div()
             .flex()
             .flex_shrink_0()
-            .gap_2()
+            .gap_1()
             .when_some(slack, |this, channel| {
                 let pull_url = pull.url.clone();
                 this.child(ui::button(
@@ -363,11 +872,80 @@ impl Root {
     /// The right-click menu, drawn over everything at the click. Any click
     /// outside it closes it.
     fn menu(&self, menu: &Menu, cx: &mut Context<Self>) -> impl IntoElement {
-        let url = menu.url.clone();
+        let items: Vec<_> = match &menu.target {
+            MenuFor::Pull(url) => {
+                let copied = url.clone();
+                let mut items = vec![menu_item(
+                    "menu-copy-url",
+                    "Copiar URL del PR",
+                    cx.listener(move |_this, _event, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                    }),
+                )];
+                if self.folders.by_url.contains_key(url) {
+                    let url = url.clone();
+                    items.push(menu_item(
+                        "menu-ungroup",
+                        "Sacar del grupo",
+                        cx.listener(move |this, _event, _window, cx| this.move_to(&url, None, cx)),
+                    ));
+                }
+                items
+            }
+            MenuFor::Folder(id) => {
+                let id = *id;
+                let subgroup = self
+                    .folders
+                    .get(id)
+                    .is_some_and(|folder| folder.parent.is_some());
+                let mut items = vec![menu_item(
+                    "menu-agent",
+                    if subgroup {
+                        "Abrir agente del grupo"
+                    } else {
+                        "Abrir agente en Orca"
+                    },
+                    cx.listener(move |this, _event, _window, cx| this.open_agent(id, cx)),
+                )];
+                if !subgroup {
+                    items.push(menu_item(
+                        "menu-subgroup",
+                        "Nuevo subgrupo",
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.start_editing(
+                                Editing::New {
+                                    pull: None,
+                                    parent: Some(id),
+                                },
+                                cx,
+                            )
+                        }),
+                    ));
+                }
+                items.push(menu_item(
+                    "menu-rename",
+                    "Renombrar",
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.start_editing(Editing::Rename(id), cx)
+                    }),
+                ));
+                items.push(menu_item(
+                    "menu-delete",
+                    match (subgroup, self.folders.children(id).next().is_some()) {
+                        (true, _) => "Eliminar subgrupo",
+                        (false, true) => "Eliminar grupo y subgrupos",
+                        (false, false) => "Eliminar grupo",
+                    },
+                    cx.listener(move |this, _event, _window, cx| this.delete_folder(id, cx)),
+                ));
+                items
+            }
+        };
 
         deferred(
             anchored().position(menu.at).snap_to_window().child(
                 div()
+                    .id("menu")
                     .occlude()
                     .flex()
                     .flex_col()
@@ -383,63 +961,355 @@ impl Root {
                         this.menu = None;
                         cx.notify();
                     }))
-                    .child(
-                        div()
-                            .id("menu-copy-url")
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
-                            .child("Copiar URL del PR")
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
-                                this.menu = None;
-                                cx.notify();
-                            })),
-                    ),
+                    // Any item closes the menu once its own handler ran.
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.menu = None;
+                        cx.notify();
+                    }))
+                    .children(items),
             ),
         )
         .with_priority(1)
     }
 
     fn refreshing(&self) -> bool {
-        self.mine.in_flight || self.reviews.in_flight
+        self.mine.in_flight || self.merged.in_flight
     }
 
     fn login(&self) -> Option<&str> {
-        [&self.mine, &self.reviews]
-            .into_iter()
-            .find_map(|feed| match &feed.load {
-                Load::Loaded(snapshot) if !snapshot.login.is_empty() => {
-                    Some(snapshot.login.as_str())
+        match &self.mine.load {
+            Load::Loaded(snapshot) if !snapshot.login.is_empty() => Some(snapshot.login.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The URLs of the user's open PRs.
+    fn open_urls(&self) -> HashSet<&str> {
+        self.mine
+            .pulls()
+            .iter()
+            .map(|pull| pull.url.as_str())
+            .collect()
+    }
+
+    /// The groups down the left: everything, the PRs in no group, then each
+    /// group with its subgroups under it. A PR dropped on a group moves into
+    /// it; dropped on "Sin grupo", out of the one it was in; dropped on "Nuevo
+    /// grupo", into a new one.
+    fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.open_urls();
+        let in_folder = |id: i64| {
+            open.iter()
+                .filter(|url| {
+                    self.folders
+                        .by_url
+                        .get(**url)
+                        .is_some_and(|member| self.folders.includes(id, *member))
+                })
+                .count()
+        };
+        let loose = open
+            .iter()
+            .filter(|url| !self.folders.by_url.contains_key(**url))
+            .count();
+        let editing = |target: &dyn Fn(&Editing) -> bool| {
+            self.editor
+                .as_ref()
+                .filter(|editor| target(&editor.target))
+                .map(|editor| editor.text.clone())
+        };
+
+        let mut folders = Vec::new();
+        for root in self
+            .folders
+            .list
+            .iter()
+            .filter(|folder| folder.parent.is_none())
+        {
+            let folded = self.folders.collapsed.contains(&root.id);
+            let children = self.folders.children(root.id).filter(|_| !folded);
+            for folder in std::iter::once(root).chain(children) {
+                let id = folder.id;
+                let indented = folder.parent.is_some();
+                folders.push(
+                    match editing(
+                        &|target| matches!(target, Editing::Rename(other) if *other == id),
+                    ) {
+                        Some(text) => self.name_field(text, indented, cx).into_any_element(),
+                        None => self
+                            .sidebar_entry(
+                                folder.name.clone(),
+                                in_folder(id),
+                                Filter::Folder(id),
+                                window,
+                                cx,
+                            )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                self.open_menu(MenuFor::Folder(id), cx),
+                            )
+                            .into_any_element(),
+                    },
+                );
+            }
+            let parent = Some(root.id);
+            if let Some(text) = editing(
+                &|target| matches!(target, Editing::New { parent: other, .. } if *other == parent),
+            ) {
+                folders.push(self.name_field(text, true, cx).into_any_element());
+            }
+        }
+        let new_name = editing(&|target| matches!(target, Editing::New { parent: None, .. }));
+
+        div()
+            .id("sidebar")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w(px(self.sidebar_width))
+            .flex_shrink_0()
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .px_2()
+                    .pb_1()
+                    .text_xs()
+                    .text_color(rgb(theme::MUTED))
+                    .child("GRUPOS"),
+            )
+            .child(self.sidebar_entry("Todos".to_string(), open.len(), Filter::All, window, cx))
+            .child(
+                self.sidebar_entry("Sin grupo".to_string(), loose, Filter::Loose, window, cx)
+                    .drag_over::<Dragged>(|style, _, _, _| drop_highlight(style))
+                    .on_drop(cx.listener(|this, dragged: &Dragged, _window, cx| {
+                        this.move_to(&dragged.url, None, cx)
+                    })),
+            )
+            .child(div().h(px(1.)).my_1().bg(rgb(theme::BORDER)))
+            .children(folders)
+            .child(match new_name {
+                Some(text) => self.name_field(text, false, cx).into_any_element(),
+                None => div()
+                    .id("folder-new")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme::BASE))
+                    .text_sm()
+                    .text_color(rgb(theme::MUTED))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+                    .child("+ Nuevo grupo")
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.start_editing(
+                            Editing::New {
+                                pull: None,
+                                parent: None,
+                            },
+                            cx,
+                        )
+                    }))
+                    .drag_over::<Dragged>(|style, _, _, _| drop_highlight(style))
+                    .on_drop(cx.listener(|this, dragged: &Dragged, _window, cx| {
+                        this.start_editing(
+                            Editing::New {
+                                pull: Some(dragged.url.clone()),
+                                parent: None,
+                            },
+                            cx,
+                        )
+                    }))
+                    .into_any_element(),
+            })
+            .when_some(self.folders_error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .px_2()
+                        .pt_2()
+                        .text_xs()
+                        .text_color(rgb(theme::RED))
+                        .child(error),
+                )
+            })
+    }
+
+    /// One clickable line of the sidebar; a group's is also a drop target.
+    fn sidebar_entry(
+        &self,
+        label: String,
+        count: usize,
+        filter: Filter,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let (id, folder) = match filter {
+            Filter::All => (SharedString::from("filter-all"), None),
+            Filter::Loose => (SharedString::from("filter-loose"), None),
+            Filter::Folder(id) => (SharedString::from(format!("folder-{id}")), Some(id)),
+        };
+        let hovered = self.hovered == Some(filter);
+        let entry = folder.and_then(|id| self.folders.get(id));
+        let indent = match entry {
+            Some(folder) if folder.parent.is_some() => SUBGROUP_INDENT,
+            _ => 0.,
+        };
+        // A top-level group: `Some(folded)` when it has subgroups to fold.
+        let fold = entry
+            .filter(|folder| folder.parent.is_none())
+            .map(|folder| {
+                self.folders
+                    .children(folder.id)
+                    .next()
+                    .map(|_| self.folders.collapsed.contains(&folder.id))
+            });
+        // A folded group stands in for its selected subgroup.
+        let selected = self.filter == filter
+            || matches!(
+                (fold, self.filter, folder),
+                (Some(Some(true)), Filter::Folder(selected), Some(id))
+                    if self.folders.get(selected).and_then(|folder| folder.parent) == Some(id)
+            );
+        let label_width = self.sidebar_width
+            - ENTRY_CHROME
+            - indent
+            - if fold.is_some() { FOLD_WIDTH } else { 0. };
+
+        div()
+            .id(id)
+            .ml(px(indent))
+            .flex()
+            .gap_2()
+            .items_center()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(theme::BASE))
+            .text_sm()
+            .cursor_pointer()
+            .when(selected, |this| this.bg(rgb(theme::SURFACE_ACTIVE)))
+            .text_color(rgb(if selected {
+                theme::ACCENT
+            } else {
+                theme::SUBTEXT
+            }))
+            .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+            .on_click(cx.listener(move |this, _event, _window, cx| this.select(filter, cx)))
+            .on_hover(cx.listener(move |this, hovering: &bool, _window, cx| {
+                if *hovering {
+                    this.hovered = Some(filter);
+                } else if this.hovered == Some(filter) {
+                    this.hovered = None;
                 }
-                _ => None,
+                cx.notify();
+            }))
+            .when_some(fold, |this, fold| {
+                this.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "fold-{}",
+                            folder.unwrap_or_default()
+                        )))
+                        .w(px(12.))
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(rgb(theme::MUTED))
+                        .when_some(fold, |this, folded| {
+                            let id = folder.unwrap_or_default();
+                            this.hover(|style| style.text_color(rgb(theme::TEXT)))
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_fold(id, cx)
+                                }))
+                                .child(if folded { "▸" } else { "▾" })
+                        }),
+                )
+            })
+            .child(label_element(label, label_width, hovered, window))
+            .child(
+                div()
+                    .w(px(COUNT_WIDTH))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_end()
+                    .text_xs()
+                    .text_color(rgb(theme::MUTED))
+                    .child(count.to_string()),
+            )
+            .when_some(folder, |this, id| {
+                this.drag_over::<Dragged>(|style, _, _, _| drop_highlight(style))
+                    .on_drop(cx.listener(move |this, dragged: &Dragged, _window, cx| {
+                        this.move_to(&dragged.url, Some(id), cx)
+                    }))
+            })
+    }
+
+    /// The group name being typed, with a caret. Clicking elsewhere saves it.
+    fn name_field(&self, text: String, indented: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .when(indented, |this| this.ml(px(SUBGROUP_INDENT)))
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(theme::ACCENT))
+            .bg(rgb(theme::MANTLE))
+            .text_sm()
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| this.finish_editing(cx)))
+            .child(if text.is_empty() {
+                div()
+                    .text_color(rgb(theme::MUTED))
+                    .child("Nombre del grupo▏")
+            } else {
+                div().child(format!("{text}▏"))
             })
     }
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut caption = match (self.login(), self.mine.fetched_at) {
-            (Some(login), Some(at)) => format!(
-                "@{login} · actualizado {}",
-                status::ago(at.elapsed().as_secs() as i64)
-            ),
+            (Some(_), Some(at)) => {
+                format!("actualizado {}", status::ago(at.elapsed().as_secs() as i64))
+            }
             _ => "consultando GitHub…".to_string(),
         };
         let deploying = self.mine.deploying(now());
         if deploying > 0 {
             caption.push_str(&format!(
-                " · siguiendo {deploying} despliegue{} cada {} s",
-                if deploying == 1 { "" } else { "s" },
-                DEPLOY_REFRESH_EVERY.as_secs()
+                " · {deploying} despliegue{} en curso",
+                if deploying == 1 { "" } else { "s" }
             ));
         }
 
         div()
             .flex()
-            .items_end()
-            .gap_4()
-            .child(div().flex_1().child(ui::heading("Pull requests", caption)))
+            .items_center()
+            .gap_3()
+            .child(self.tabs(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(rgb(theme::MUTED))
+                    .child(caption),
+            )
+            .when_some(
+                match self.filter {
+                    Filter::Folder(id) => Some(id),
+                    _ => None,
+                },
+                |this, id| {
+                    let opening = self.opening_agent.is_some();
+                    this.child(ui::button(
+                        "agent",
+                        if opening { "Abriendo…" } else { "Agente" },
+                        !opening,
+                        cx.listener(move |this, _event, _window, cx| this.open_agent(id, cx)),
+                    ))
+                },
+            )
             .child(ui::button(
                 "refresh",
                 if self.refreshing() {
@@ -454,7 +1324,7 @@ impl Root {
 
     fn tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let count = |feed: &Feed| match &feed.load {
-            Load::Loaded(snapshot) => format!(" ({})", snapshot.pulls.len()),
+            Load::Loaded(snapshot) => format!(" ({})", self.visible(&snapshot.pulls).len()),
             _ => String::new(),
         };
 
@@ -464,95 +1334,552 @@ impl Root {
             .child(ui::toggle_button(
                 "tab-mine",
                 format!("Mis PRs{}", count(&self.mine)),
-                self.tab == Search::Mine,
-                cx.listener(|this, _event, _window, cx| this.show(Search::Mine, cx)),
+                self.tab == Tab::Mine,
+                cx.listener(|this, _event, _window, cx| this.show(Tab::Mine, cx)),
             ))
             .child(ui::toggle_button(
-                "tab-reviews",
-                format!("Me piden review{}", count(&self.reviews)),
-                self.tab == Search::ReviewRequested,
-                cx.listener(|this, _event, _window, cx| this.show(Search::ReviewRequested, cx)),
+                "tab-merged",
+                "Mergeadas",
+                self.tab == Tab::Merged,
+                cx.listener(|this, _event, _window, cx| this.show(Tab::Merged, cx)),
             ))
     }
 
     fn body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let feed = self.feed(self.tab);
+        if self.tab == Tab::Merged {
+            return self.merged_list(cx).into_any_element();
+        }
 
-        match &feed.load {
+        match &self.mine.load {
             Load::Loading => message("Cargando…", theme::SUBTEXT).into_any_element(),
             Load::Failed(error) => message(error.clone(), theme::RED).into_any_element(),
-            Load::Loaded(snapshot) if snapshot.pulls.is_empty() => message(
-                match feed.search {
-                    Search::Mine => "No tienes PRs abiertos.",
-                    Search::ReviewRequested => "Nadie te está pidiendo review.",
-                },
-                theme::SUBTEXT,
-            )
-            .into_any_element(),
-            Load::Loaded(snapshot) => match feed.search {
-                Search::Mine => self.mine_list(&snapshot.pulls, cx).into_any_element(),
-                Search::ReviewRequested => self.review_list(&snapshot.pulls, cx).into_any_element(),
-            },
+            Load::Loaded(snapshot) => {
+                if let Some(group) = self.board_group() {
+                    return self.board(group, &snapshot.pulls, cx).into_any_element();
+                }
+                let pulls = self.visible(&snapshot.pulls);
+                let merged = self.folder_merged();
+                if pulls.is_empty() && merged.is_empty() {
+                    return message(
+                        if self.filter == Filter::All {
+                            "No tienes PRs abiertos."
+                        } else {
+                            "No hay PRs en este grupo."
+                        },
+                        theme::SUBTEXT,
+                    )
+                    .into_any_element();
+                }
+                self.mine_list(&pulls, &merged, cx).into_any_element()
+            }
         }
     }
 
-    /// The user's own PRs: a summary of the groups, then one section per group.
-    fn mine_list(&self, pulls: &[PullRequest], cx: &mut Context<Self>) -> impl IntoElement {
+    /// The PRs of `pulls` the sidebar's filter lets through.
+    fn visible<'a>(&self, pulls: &'a [PullRequest]) -> Vec<&'a PullRequest> {
+        pulls.iter().filter(|pull| self.shows(&pull.url)).collect()
+    }
+
+    /// The merged PRs of the selected group, so a group's view shows what of
+    /// it already shipped. Empty unless a group is selected.
+    fn folder_merged(&self) -> Vec<&merged::Merged> {
+        match (self.filter, &self.merged.pulls) {
+            (Filter::Folder(_), Some(pulls)) => {
+                pulls.iter().filter(|pull| self.shows(&pull.url)).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The user's own PRs: a one-line count per group, then one section per
+    /// group, and last the selected group's merged PRs.
+    fn mine_list(
+        &self,
+        pulls: &[&PullRequest],
+        merged: &[&merged::Merged],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let now = now();
         let in_group = |group: Group| {
             pulls
                 .iter()
+                .copied()
                 .filter(move |pull| Group::of(pull, now) == group)
         };
 
-        let sections: Vec<_> = Group::ALL
+        let mut sections: Vec<_> = Group::ALL
             .into_iter()
             .filter_map(|group| {
                 let rows: Vec<_> = in_group(group)
-                    .map(|pull| self.row(pull, group.color(), false, cx).into_any_element())
+                    .map(|pull| self.row(pull, group.color(), cx).into_any_element())
                     .collect();
-                (!rows.is_empty()).then(|| section(group.title(), group.color(), rows))
+                (!rows.is_empty())
+                    .then(|| section(group.title(), group.color(), rows).into_any_element())
             })
             .collect();
+        if !merged.is_empty() {
+            let rows = merged
+                .iter()
+                .map(|pull| self.merged_row(pull, true, cx).into_any_element())
+                .collect();
+            sections.push(section("Mergeadas", theme::ACCENT, rows).into_any_element());
+        }
 
         div()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .flex_1()
             .min_h(px(0.))
             .child(
-                div().flex().gap_2().children(
-                    Group::ALL.map(|group| {
-                        ui::stat(in_group(group).count(), group.title(), group.color())
-                    }),
-                ),
+                div()
+                    .flex()
+                    .gap_3()
+                    .text_xs()
+                    .children(Group::ALL.map(|group| {
+                        let count = in_group(group).count();
+                        div()
+                            .text_color(rgb(if count == 0 {
+                                theme::MUTED
+                            } else {
+                                group.color()
+                            }))
+                            .child(format!("{count} {}", group.short()))
+                    })),
             )
             .child(list("mine").children(sections))
     }
 
-    /// PRs waiting on the user's review, in GitHub's most-recently-updated order.
-    fn review_list(&self, pulls: &[PullRequest], cx: &mut Context<Self>) -> impl IntoElement {
-        let rows: Vec<_> = pulls
-            .iter()
-            .map(|pull| self.row(pull, theme::BLUE, true, cx).into_any_element())
+    /// The selected group when "Mis PRs" shows it as a board: a top-level
+    /// group with subgroups.
+    fn board_group(&self) -> Option<i64> {
+        match self.filter {
+            Filter::Folder(id)
+                if self
+                    .folders
+                    .get(id)
+                    .is_some_and(|folder| folder.parent.is_none())
+                    && self.folders.children(id).next().is_some() =>
+            {
+                Some(id)
+            }
+            _ => None,
+        }
+    }
+
+    /// A group with subgroups: the counts for all of it, then one column per
+    /// subgroup, led by one for the PRs in the group itself when it has any.
+    /// The columns scroll sideways when they don't fit.
+    fn board(&self, id: i64, pulls: &[PullRequest], cx: &mut Context<Self>) -> impl IntoElement {
+        let now = now();
+        let visible = self.visible(pulls);
+        let merged = self.merged.pulls.as_deref().unwrap_or_default();
+        let in_column = |column: i64| {
+            let open: Vec<_> = visible
+                .iter()
+                .copied()
+                .filter(|pull| self.folders.by_url.get(&pull.url) == Some(&column))
+                .collect();
+            let shipped: Vec<_> = merged
+                .iter()
+                .filter(|pull| self.folders.by_url.get(&pull.url) == Some(&column))
+                .collect();
+            (open, shipped)
+        };
+
+        let mut columns = Vec::new();
+        let (open, shipped) = in_column(id);
+        if !open.is_empty() || !shipped.is_empty() {
+            columns.push(
+                self.board_column(id, &open, &shipped, cx)
+                    .into_any_element(),
+            );
+        }
+        for subgroup in self.folders.children(id) {
+            let (open, shipped) = in_column(subgroup.id);
+            columns.push(
+                self.board_column(subgroup.id, &open, &shipped, cx)
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .flex_1()
+            .min_h(px(0.))
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .text_xs()
+                    .children(Group::ALL.map(|group| {
+                        let count = visible
+                            .iter()
+                            .filter(|pull| Group::of(pull, now) == group)
+                            .count();
+                        div()
+                            .text_color(rgb(if count == 0 {
+                                theme::MUTED
+                            } else {
+                                group.color()
+                            }))
+                            .child(format!("{count} {}", group.short()))
+                    })),
+            )
+            .child(
+                div()
+                    .id("board")
+                    .flex()
+                    .gap_3()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_x_scroll()
+                    .children(columns),
+            )
+    }
+
+    /// One column of the board, for a subgroup or, as "Sin subgrupo", for the
+    /// PRs in the group itself: its name and count, its PRs by what they wait
+    /// on, and its merged PRs folded at the bottom. A PR dropped on it moves
+    /// into its group; a right click on the name opens the group's menu.
+    fn board_column(
+        &self,
+        id: i64,
+        open: &[&PullRequest],
+        shipped: &[&merged::Merged],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let now = now();
+        let name = match self.folders.get(id) {
+            Some(folder) if folder.parent.is_some() => folder.name.clone(),
+            _ => "Sin subgrupo".to_string(),
+        };
+        let mut cards: Vec<_> = Group::ALL
+            .into_iter()
+            .flat_map(|group| {
+                open.iter()
+                    .copied()
+                    .filter(move |pull| Group::of(pull, now) == group)
+                    .map(move |pull| (group, pull))
+            })
+            .map(|(group, pull)| self.card(pull, group.color(), cx).into_any_element())
             .collect();
-        list("reviews").child(section("Te piden review", theme::BLUE, rows))
+        if cards.is_empty() {
+            cards.push(
+                div()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_dashed()
+                    .border_color(rgb(theme::BORDER))
+                    .text_xs()
+                    .text_color(rgb(theme::MUTED))
+                    .child("Sin PRs abiertos. Arrastra uno aquí.")
+                    .into_any_element(),
+            );
+        }
+        let unfolded = self.merged_open.contains(&id);
+
+        div()
+            .id(SharedString::from(format!("column-{id}")))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w(px(BOARD_COLUMN))
+            .flex_shrink_0()
+            .p_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(theme::BASE))
+            .bg(rgb(theme::MANTLE))
+            .drag_over::<Dragged>(|style, _, _, _| drop_highlight(style))
+            .on_drop(cx.listener(move |this, dragged: &Dragged, _window, cx| {
+                this.move_to(&dragged.url, Some(id), cx)
+            }))
+            .child(
+                div()
+                    .id(SharedString::from(format!("column-name-{id}")))
+                    .flex()
+                    .gap_2()
+                    .items_center()
+                    .px_1()
+                    .text_sm()
+                    .text_color(rgb(theme::SUBTEXT))
+                    .on_mouse_down(MouseButton::Right, self.open_menu(MenuFor::Folder(id), cx))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(name))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(theme::MUTED))
+                            .child(open.len().to_string()),
+                    ),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("column-cards-{id}")))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .children(cards)
+                    .when(!shipped.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .id(SharedString::from(format!("column-merged-{id}")))
+                                .px_1()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(theme::ACCENT))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    if !this.merged_open.remove(&id) {
+                                        this.merged_open.insert(id);
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(format!(
+                                    "{} {} mergeado{}",
+                                    if unfolded { "▾" } else { "▸" },
+                                    shipped.len(),
+                                    if shipped.len() == 1 { "" } else { "s" }
+                                )),
+                        )
+                        .when(unfolded, |this| {
+                            this.children(
+                                shipped
+                                    .iter()
+                                    .map(|pull| self.merged_row(pull, true, cx).into_any_element()),
+                            )
+                        })
+                    }),
+            )
+    }
+
+    /// A PR on the board: the row's content packed for a narrow column. Its
+    /// buttons show while the mouse is over it, or while a `/deploy` is going.
+    fn card(&self, pull: &PullRequest, stripe: u32, cx: &mut Context<Self>) -> impl IntoElement {
+        let expanded = self.expanded.contains(&pull.url);
+        let url = pull.url.clone();
+        let show_actions = self.hovered_card.as_deref() == Some(pull.url.as_str())
+            || self.deploys.contains_key(&pull.url);
+
+        div()
+            .id(SharedString::from(format!("card-{}", pull.url)))
+            .on_drag(
+                Dragged {
+                    url: pull.url.clone(),
+                    title: pull.title.clone().into(),
+                },
+                drag_preview,
+            )
+            .on_hover(cx.listener(move |this, hovering: &bool, _window, cx| {
+                if *hovering {
+                    this.hovered_card = Some(url.clone());
+                } else if this.hovered_card.as_deref() == Some(url.as_str()) {
+                    this.hovered_card = None;
+                }
+                cx.notify();
+            }))
+            .flex()
+            .gap_2()
+            .p_2()
+            .rounded_lg()
+            .bg(rgb(theme::SURFACE))
+            .child(div().w(px(3.)).flex_shrink_0().rounded_sm().bg(rgb(stripe)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(
+                        div()
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                self.open_menu(MenuFor::Pull(pull.url.clone()), cx),
+                            )
+                            .child(card_summary(pull)),
+                    )
+                    .when(!pull.failing_checks.is_empty(), |this| {
+                        this.child(failures(pull))
+                    })
+                    .when_some(
+                        match self.deploys.get(&pull.url) {
+                            Some(Deploy::Failed(error)) => Some(error.clone()),
+                            _ => None,
+                        },
+                        |this, error| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme::RED))
+                                    .child(format!("No se pudo enviar /deploy: {error}")),
+                            )
+                        },
+                    )
+                    .when_some(pull.pipeline.as_ref(), |this, run| {
+                        this.child(self.pipeline_bar(pull, run, expanded, cx))
+                            .when(expanded, |this| this.child(steps(pull, run)))
+                    })
+                    .when(show_actions, |this| this.child(self.actions(pull, cx))),
+            )
+    }
+
+    /// The user's merged PRs, one section per local day, newest first.
+    fn merged_list(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let feed = &self.merged;
+        let Some(pulls) = &feed.pulls else {
+            return match &feed.error {
+                Some(error) => message(error.clone(), theme::RED).into_any_element(),
+                None => message("Cargando…", theme::SUBTEXT).into_any_element(),
+            };
+        };
+
+        let today = merged::day_of(now());
+        let mut days: Vec<(chrono::NaiveDate, Vec<gpui::AnyElement>)> = Vec::new();
+        for pull in pulls.iter().filter(|pull| self.shows(&pull.url)) {
+            let day = merged::day_of(pull.merged_at);
+            let row = self.merged_row(pull, false, cx).into_any_element();
+            match days.last_mut() {
+                Some((last, rows)) if *last == day => rows.push(row),
+                _ => days.push((day, vec![row])),
+            }
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .flex_1()
+            .min_h(px(0.))
+            .when_some(feed.error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme::RED))
+                        .truncate()
+                        .child(format!("No se pudo actualizar: {error}")),
+                )
+            })
+            .child(if days.is_empty() {
+                message(
+                    if self.filter == Filter::All {
+                        "Todavía no hay PRs mergeados en el registro."
+                    } else {
+                        "No hay PRs mergeados en este grupo."
+                    },
+                    theme::SUBTEXT,
+                )
+                .into_any_element()
+            } else {
+                list("merged")
+                    .children(days.into_iter().map(|(day, rows)| {
+                        let color = if day == today {
+                            theme::ACCENT
+                        } else {
+                            theme::SUBTEXT
+                        };
+                        section(&merged::day_label(day, today), color, rows)
+                    }))
+                    .into_any_element()
+            })
+            .into_any_element()
+    }
+
+    /// One merged PR: repo, branches, title and when it merged, the day too
+    /// when it isn't under a day's heading. Clicking it opens the PR; a right
+    /// click opens the menu; dragging it onto a group moves it there.
+    fn merged_row(
+        &self,
+        pull: &merged::Merged,
+        with_day: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let url = pull.url.clone();
+        let mut when = merged::time_of(pull.merged_at);
+        if with_day {
+            let day = merged::day_label(merged::day_of(pull.merged_at), merged::day_of(now()));
+            when = format!("{day} {when}");
+        }
+
+        div()
+            .id(SharedString::from(format!("merged-{}", pull.url)))
+            .on_drag(
+                Dragged {
+                    url: pull.url.clone(),
+                    title: pull.title.clone().into(),
+                },
+                drag_preview,
+            )
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .bg(rgb(theme::SURFACE))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+            .on_click(move |_event, _window, cx| cx.open_url(&url))
+            .on_mouse_down(
+                MouseButton::Right,
+                self.open_menu(MenuFor::Pull(pull.url.clone()), cx),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .text_xs()
+                    .text_color(rgb(theme::MUTED))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(format!(
+                        "{} #{} · {} ← {}",
+                        pull.repo_name(),
+                        pull.number,
+                        pull.base,
+                        pull.head
+                    )))
+                    .child(div().flex_shrink_0().font_family("Menlo").child(when)),
+            )
+            .child(div().text_sm().truncate().child(pull.title.clone()))
+    }
+
+    /// The right-mouse-down handler that opens the menu for `target` at the click.
+    fn open_menu(
+        &self,
+        target: MenuFor,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+            this.menu = Some(Menu {
+                target: target.clone(),
+                at: event.position,
+            });
+            cx.notify();
+        })
     }
 
     /// One PR. The colored stripe repeats the section's color so a row keeps its
     /// meaning when scrolled away from the heading. The PR and its pipeline are
     /// separate click targets: one opens GitHub, the other unfolds the run.
-    fn row(
-        &self,
-        pull: &PullRequest,
-        stripe: u32,
-        show_author: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn row(&self, pull: &PullRequest, stripe: u32, cx: &mut Context<Self>) -> impl IntoElement {
         let expanded = self.expanded.contains(&pull.url);
 
         div()
+            .id(SharedString::from(format!("row-{}", pull.url)))
+            .on_drag(
+                Dragged {
+                    url: pull.url.clone(),
+                    title: pull.title.clone().into(),
+                },
+                drag_preview,
+            )
             .flex()
             .gap_3()
             .p_2()
@@ -575,20 +1902,17 @@ impl Root {
                                 div()
                                     .flex_1()
                                     .min_w(px(0.))
-                                    .on_mouse_down(MouseButton::Right, {
-                                        let url = pull.url.clone();
-                                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                            this.menu = Some(Menu {
-                                                url: url.clone(),
-                                                at: event.position,
-                                            });
-                                            cx.notify();
-                                        })
-                                    })
-                                    .child(summary(pull, show_author)),
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        self.open_menu(MenuFor::Pull(pull.url.clone()), cx),
+                                    )
+                                    .child(summary(pull)),
                             )
                             .child(self.actions(pull, cx)),
                     )
+                    .when(!pull.failing_checks.is_empty(), |this| {
+                        this.child(failures(pull))
+                    })
                     .when_some(
                         match self.deploys.get(&pull.url) {
                             Some(Deploy::Failed(error)) => Some(error.clone()),
@@ -679,6 +2003,97 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// A sidebar name in its fixed width. Cut with an ellipsis, or, while hovered
+/// and too long to fit, sliding back and forth so all of it can be read.
+fn label_element(label: String, width: f32, hovered: bool, window: &Window) -> gpui::AnyElement {
+    let overflow = text_width(&label, window) - width;
+    let frame = div().w(px(width)).flex_shrink_0().overflow_hidden();
+    if !hovered || overflow <= 0. {
+        return frame.truncate().child(label).into_any_element();
+    }
+
+    let cycle = MARQUEE_WAIT + overflow / MARQUEE_SPEED + MARQUEE_HOLD + MARQUEE_RETURN;
+    frame
+        .child(
+            div()
+                .whitespace_nowrap()
+                .child(label.clone())
+                .with_animation(
+                    SharedString::from(format!("marquee-{label}")),
+                    gpui::Animation::new(Duration::from_secs_f32(cycle)).repeat(),
+                    move |this: gpui::Div, delta| {
+                        this.ml(px(-marquee_offset(delta * cycle, overflow)))
+                    },
+                ),
+        )
+        .into_any_element()
+}
+
+/// How far left a name that overflows by `overflow` pixels is, `elapsed`
+/// seconds into its cycle.
+fn marquee_offset(elapsed: f32, overflow: f32) -> f32 {
+    let slide = overflow / MARQUEE_SPEED;
+    let t = elapsed - MARQUEE_WAIT;
+    if t <= 0. {
+        0.
+    } else if t < slide {
+        t * MARQUEE_SPEED
+    } else if t < slide + MARQUEE_HOLD {
+        overflow
+    } else {
+        let back = ((t - slide - MARQUEE_HOLD) / MARQUEE_RETURN).min(1.);
+        overflow * (1. - back)
+    }
+}
+
+/// The width `text` takes in the sidebar's font.
+fn text_width(text: &str, window: &Window) -> f32 {
+    let style = window.text_style();
+    let size = gpui::rems(0.875).to_pixels(window.rem_size());
+    let line = window.text_system().shape_line(
+        SharedString::from(text.to_string()),
+        size,
+        &[style.to_run(text.len())],
+        None,
+    );
+    f32::from(line.width)
+}
+
+/// How a sidebar entry looks while a PR is dragged over it.
+fn drop_highlight(style: gpui::StyleRefinement) -> gpui::StyleRefinement {
+    style
+        .bg(rgb(theme::SURFACE_ACTIVE))
+        .border_color(rgb(theme::ACCENT))
+}
+
+fn menu_item(
+    id: &'static str,
+    label: &'static str,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::AnyElement {
+    div()
+        .id(id)
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+        .child(label)
+        .on_click(on_click)
+        .into_any_element()
+}
+
+/// Builds the chip a dragged PR row shows under the cursor.
+fn drag_preview(
+    dragged: &Dragged,
+    at: Point<Pixels>,
+    _: &mut Window,
+    cx: &mut App,
+) -> gpui::Entity<DragPreview> {
+    let title = dragged.title.clone();
+    cx.new(|_| DragPreview { title, at })
+}
+
 fn message(text: impl Into<SharedString>, color: u32) -> impl IntoElement {
     div()
         .p_4()
@@ -701,7 +2116,7 @@ fn list(id: &'static str) -> gpui::Stateful<gpui::Div> {
         .overflow_y_scroll()
 }
 
-fn section(title: &str, color: u32, rows: Vec<gpui::AnyElement>) -> impl IntoElement {
+fn section(title: &str, color: u32, rows: Vec<gpui::AnyElement>) -> impl IntoElement + use<> {
     div()
         .flex()
         .flex_col()
@@ -724,18 +2139,15 @@ fn section(title: &str, color: u32, rows: Vec<gpui::AnyElement>) -> impl IntoEle
 }
 
 /// Repo, branches, title and badges. Clicking it opens the PR on GitHub.
-fn summary(pull: &PullRequest, show_author: bool) -> impl IntoElement {
+fn summary(pull: &PullRequest) -> impl IntoElement {
     let url = pull.url.clone();
-    let mut context = format!(
+    let context = format!(
         "{} #{} · {} ← {}",
         pull.repo_name(),
         pull.number,
         pull.base,
         pull.head
     );
-    if show_author {
-        context = format!("@{} · {context}", pull.author);
-    }
 
     div()
         .id(SharedString::from(format!("open-{}", pull.url)))
@@ -781,16 +2193,114 @@ fn summary(pull: &PullRequest, show_author: bool) -> impl IntoElement {
                 )
                 .when(pull.comments > 0, |this| {
                     this.child(ui::badge(format!("💬 {}", pull.comments), theme::SUBTEXT))
-                })
-                .when(!pull.failing_checks.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_xs()
-                            .text_color(rgb(theme::RED))
-                            .child(format!("falla: {}", pull.failing_checks.join(", "))),
-                    )
+                }),
+        )
+}
+
+/// A board card's top: repo, number and age, the title in up to two lines,
+/// and the badges. Clicking it opens the PR on GitHub.
+fn card_summary(pull: &PullRequest) -> impl IntoElement {
+    let url = pull.url.clone();
+
+    div()
+        .id(SharedString::from(format!("open-{}", pull.url)))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_1()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+        .active(|style| style.bg(rgb(theme::SURFACE_ACTIVE)))
+        .on_click(move |_event, _window, cx| cx.open_url(&url))
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .text_xs()
+                .text_color(rgb(theme::MUTED))
+                .child(div().flex_1().min_w(px(0.)).truncate().child(format!(
+                    "{} #{}",
+                    pull.repo_name(),
+                    pull.number
+                )))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .child(status::ago(now() - pull.updated_at)),
+                ),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(theme::TEXT))
+                .line_clamp(2)
+                .child(pull.title.clone()),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .items_center()
+                .children(
+                    status::badges(pull)
+                        .into_iter()
+                        .map(|badge| ui::badge(badge.label, badge.color)),
+                )
+                .when(pull.comments > 0, |this| {
+                    this.child(ui::badge(format!("💬 {}", pull.comments), theme::SUBTEXT))
+                }),
+        )
+}
+
+/// Every failed check with why it failed; clicking one opens its logs.
+fn failures(pull: &PullRequest) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .p_1()
+        .rounded_md()
+        .bg(rgb(theme::MANTLE))
+        .text_xs()
+        .children(
+            pull.failing_checks
+                .iter()
+                .enumerate()
+                .map(|(index, check)| {
+                    let url = check.url.clone();
+                    div()
+                        .id(SharedString::from(format!("check-{index}-{}", pull.url)))
+                        .flex()
+                        .gap_2()
+                        .px_1()
+                        .rounded_sm()
+                        .when_some(url, |this, url| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+                                .on_click(move |_event, _window, cx| cx.open_url(&url))
+                        })
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(rgb(theme::RED))
+                                .child(format!("✗ {}", check.name)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_color(rgb(theme::SUBTEXT))
+                                .child(check.reason.clone().unwrap_or_else(|| {
+                                    if check.url.is_some() {
+                                        "ver logs".to_string()
+                                    } else {
+                                        String::new()
+                                    }
+                                })),
+                        )
                 }),
         )
 }
@@ -873,28 +2383,52 @@ impl Focusable for Root {
 }
 
 impl Render for Root {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .key_context("Root")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, action, _window, cx| this.refresh(action, cx)))
-            .on_action(cx.listener(|this, _: &ShowMine, _window, cx| this.show(Search::Mine, cx)))
-            .on_action(cx.listener(|this, _: &ShowReviews, _window, cx| {
-                this.show(Search::ReviewRequested, cx)
-            }))
+            .on_action(cx.listener(|this, _: &ShowMine, _window, cx| this.show(Tab::Mine, cx)))
+            .on_action(cx.listener(|this, _: &ShowMerged, _window, cx| this.show(Tab::Merged, cx)))
+            .on_key_down(cx.listener(|this, event, _window, cx| this.edit_key(event, cx)))
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .size_full()
-            .p_5()
+            .p_4()
             .bg(rgb(theme::BASE))
             .text_color(rgb(theme::TEXT))
-            .child(self.header(cx))
-            .child(self.tabs(cx))
-            .child(self.body(cx))
+            .child(
+                div()
+                    .id("columns")
+                    .flex()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .on_drag_move(cx.listener(
+                        |this, event: &gpui::DragMoveEvent<ResizeSidebar>, _window, cx| {
+                            this.resize_sidebar(event.event.position.x, event.bounds.left(), cx)
+                        },
+                    ))
+                    .on_drop(cx.listener(|this, _: &ResizeSidebar, _window, cx| {
+                        let width = this.sidebar_width;
+                        this.save(cx, move || folders::save_sidebar_width(width));
+                    }))
+                    .child(self.sidebar(window, cx))
+                    .child(self.sidebar_handle())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(self.header(cx))
+                            .child(self.body(cx)),
+                    ),
+            )
             .when_some(self.menu.as_ref(), |this, menu| this.child(self.menu(menu, cx)))
             .child(div().text_xs().text_color(rgb(theme::MUTED)).child(
-                "clic en el PR lo abre · clic derecho copia su URL · clic en el pipeline lo despliega · cmd-r actualiza · cmd-1 / cmd-2 cambian de pestaña",
+                "clic abre el PR · arrástralo a un grupo · clic derecho para más · cmd-r actualiza · cmd-1/2 pestañas",
             ))
     }
 }
@@ -906,10 +2440,10 @@ fn main() {
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-r", Refresh, Some("Root")),
             KeyBinding::new("cmd-1", ShowMine, Some("Root")),
-            KeyBinding::new("cmd-2", ShowReviews, Some("Root")),
+            KeyBinding::new("cmd-2", ShowMerged, Some("Root")),
         ]);
 
-        let bounds = Bounds::centered(None, size(px(760.), px(760.)), cx);
+        let bounds = Bounds::centered(None, size(px(960.), px(760.)), cx);
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
@@ -930,4 +2464,22 @@ fn main() {
         .unwrap();
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_name_waits_slides_to_its_end_holds_and_comes_back() {
+        let overflow = 60.;
+        let slide = overflow / MARQUEE_SPEED;
+
+        let at = |elapsed: f32| marquee_offset(elapsed, overflow);
+
+        assert_eq!(at(MARQUEE_WAIT / 2.), 0.);
+        assert_eq!(at(MARQUEE_WAIT + slide / 2.), overflow / 2.);
+        assert_eq!(at(MARQUEE_WAIT + slide + MARQUEE_HOLD / 2.), overflow);
+        assert_eq!(at(MARQUEE_WAIT + slide + MARQUEE_HOLD + MARQUEE_RETURN), 0.);
+    }
 }
