@@ -45,9 +45,9 @@ de deploy** (ver [El pipeline](#el-pipeline)):
 | `GH_PR_STATUS_GCP_PREPROD` | Proyecto de GCP del ambiente pre-prod, tal como aparece en el link a los logs (`…?project=<id>`) | `acme-staging` |
 | `GH_PR_STATUS_GCP_PROD` | Proyecto de GCP de prod | `acme-prod` |
 | `GH_PR_STATUS_GCP_DEVELOPMENT` | Proyecto de GCP de development | `acme-dev` |
-| `GH_PR_STATUS_SLACK_CHANNEL` | ID del canal de Slack donde inicias tu workflow (por ejemplo, pedir review). Agrega «Pedir review en Slack» al menú de cada PR | `C0123456789` |
+| `GH_PR_STATUS_SLACK_CHANNEL` | ID del canal de Slack donde inicias tu workflow (por ejemplo, pedir review). Agrega «Solicitar review» al menú de cada PR | `C0123456789` |
 | `GH_PR_STATUS_CODE_DIR` | Dónde están clonados los repos que lee el agente de cada grupo. Por defecto, `~/code` | `~/code` |
-| `GH_PR_STATUS_REVIEW_WEBHOOK` | URL del webhook del workflow de review de Slack (`hooks.slack.com/triggers/…`). Habilita el formulario «Pedir review en Slack…» | `https://hooks.slack.com/triggers/T…/…/…` |
+| `GH_PR_STATUS_REVIEW_WEBHOOK` | URL del webhook del workflow de review de Slack (`hooks.slack.com/triggers/…`). Habilita el formulario «Solicitar review» | `https://hooks.slack.com/triggers/T…/…/…` |
 | `GH_PR_STATUS_SLACK_USER` | Tu ID de usuario de Slack, que va como requester | `U0123456789` |
 | `GH_PR_STATUS_REVIEWERS` | Los reviewers del formulario, como `Nombre:ID` separados por coma | `Ana:U01,Beto:U02` |
 | `GH_PR_STATUS_REVIEW_CHANNELS` | Los canales del formulario, igual; el primero queda preseleccionado | `team-prs:C0123456789` |
@@ -177,9 +177,10 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   hora, todos los errores (servicio y causa) y un botón para abrir el comentario.
 - **Clic en el título** abre el PR en el navegador.
 - **El menú del PR**, con el «⋯» que aparece al pasar el mouse o con clic derecho, reúne sus
-  acciones: pedir al agente, pedir review en Slack, comentar `/deploy`, ver los logs de cada
-  check fallido, copiar la URL y sacarlo del grupo.
-- **Pedir review en Slack…** abre un formulario en una ventana aparte: reviewer (de la lista de
+  acciones: pedir al agente (salvo cuando lo que falta es responder hilos de review), solicitar
+  review, `/deploy`, ver los logs de cada check fallido (menos docs-check), copiar la URL y
+  sacarlo del grupo.
+- **Solicitar review** abre un formulario en una ventana aparte: reviewer (de la lista de
   `GH_PR_STATUS_REVIEWERS`), urgencia (highest, high, medium, low), canal, comentario, y el
   link del PR ya puesto. «Enviar a Slack» (o enter) hace un `POST` al webhook del workflow de
   review del equipo, que publica el pedido con su botón «aprobar»; tú vas como requester. La
@@ -188,7 +189,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   `GH_PR_STATUS_REVIEWERS` y `GH_PR_STATUS_REVIEW_CHANNELS`; sin ellas, y con
   `GH_PR_STATUS_SLACK_CHANNEL`, el menú vuelve a copiar el link y abrir el canal. El
   comentario se escribe sin campo nativo: los acentos con tecla muerta no se componen.
-- **Comentar /deploy** comenta `/deploy` en el PR, como tu usuario de `gh`, para iniciar el
+- **/deploy** comenta `/deploy` en el PR, como tu usuario de `gh`, para iniciar el
   pipeline. Pide un segundo clic de confirmación (dentro de 5 s; el menú se queda abierto) y
   no aparece en borradores ni mientras hay un deploy en curso.
 - Las listas se recargan solas cada minuto; mientras alguno de tus PRs está desplegando,

@@ -1014,7 +1014,9 @@ impl Root {
         if let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) {
             let mine = pull.author == self.login().unwrap_or_default();
             let action = status::action(pull, stack::below(pull, self.mine.pulls()), now);
-            if let Some(task) = action.task.filter(|_| mine) {
+            // Review threads get answered by hand, never by the agent.
+            let task = action.task.filter(|_| mine && pull.threads.is_empty());
+            if let Some(task) = task {
                 let asked = url.to_string();
                 items.push(ui::menu_item(
                     "menu-ask",
@@ -1036,14 +1038,14 @@ impl Root {
                 let asked = url.to_string();
                 items.push(ui::menu_item(
                     "menu-review",
-                    "Pedir review en Slack…",
+                    "Solicitar review",
                     cx.listener(move |this, _event, _window, cx| this.open_review(&asked, cx)),
                 ));
             } else if let Some(channel) = slack_channel().filter(|_| wants_review) {
                 let copied = url.to_string();
                 items.push(ui::menu_item(
                     "menu-slack",
-                    "Pedir review en Slack",
+                    "Solicitar review",
                     move |_event, _window, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
                         cx.open_url(channel);
@@ -1060,7 +1062,7 @@ impl Root {
                         "¿Enviar /deploy? Clic de nuevo para confirmar"
                     }
                     Some(Deploy::Sending) => "Enviando /deploy…",
-                    _ => "Comentar /deploy",
+                    _ => "/deploy",
                 };
                 let target = url.to_string();
                 items.push(ui::menu_item(
@@ -1076,7 +1078,12 @@ impl Root {
                     }),
                 ));
             }
-            for (index, check) in pull.failing_checks.iter().enumerate() {
+            // The docs check's logs never say more than its name does.
+            let checks = pull
+                .failing_checks
+                .iter()
+                .filter(|check| !check.name.contains("docs"));
+            for (index, check) in checks.enumerate() {
                 if let Some(logs) = check.url.clone() {
                     items.push(ui::menu_item(
                         SharedString::from(format!("menu-logs-{index}")),
@@ -1090,7 +1097,7 @@ impl Root {
         let copied = url.to_string();
         items.push(ui::menu_item(
             "menu-copy-url",
-            "Copiar URL del PR",
+            "Copiar URL",
             move |_event, _window, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
             },
