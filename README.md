@@ -113,7 +113,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   - **Borradores.**
 - **Mergeadas** lista tus PRs mergeados agrupados por día (Hoy, Ayer, «martes 13 oct»…), con
   la hora del merge. El registro parte el lunes de la semana pasada y se guarda en
-  `~/Library/Application Support/gh-pr-status/merged.sqlite`: cada 5 minutos la app solo pide
+  `~/Library/Application Support/PR Manager/merged.sqlite`: cada 5 minutos la app solo pide
   a GitHub lo mergeado desde la última sincronización (normalmente, hoy). Si la búsqueda de
   GitHub devuelve menos resultados de los que cuenta, guarda los que llegaron y vuelve a pedir
   los mismos días en la siguiente. Muestra los últimos 60 días; los anteriores quedan en el
@@ -125,7 +125,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   (sus PRs vuelven a «Sin grupo»). Un PR está en un solo grupo y se recuerda por su URL, así
   que sigue ahí después de mergearse. Arrastra la línea entre la barra y los PRs para
   cambiar su ancho, que se recuerda al reiniciar. Se guardan en
-  `~/Library/Application Support/gh-pr-status/groups.sqlite`. El nombre se escribe sin un
+  `~/Library/Application Support/PR Manager/groups.sqlite`. El nombre se escribe sin un
   campo de texto nativo: los acentos con tecla muerta (´ + a) no se componen.
 - **Subgrupos**, un nivel bajo cada grupo: clic derecho sobre el grupo → «Nuevo subgrupo».
   Al elegir el grupo ves sus PRs y los de todos sus subgrupos; al elegir un subgrupo, solo los
