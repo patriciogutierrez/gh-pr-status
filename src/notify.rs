@@ -19,6 +19,7 @@ const BUNDLE_ID: &str = "com.patriciogutierrez.gh-pr-status";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Seen {
     review: Review,
+    base: String,
     pipeline: Option<RunSeen>,
 }
 
@@ -50,6 +51,7 @@ pub fn transitions(
     for pull in pulls {
         let current = Seen {
             review: pull.review,
+            base: pull.base.clone(),
             pipeline: pull.pipeline.as_ref().map(|run| RunSeen {
                 comment: run.url.clone(),
                 milestones: run.milestones(),
@@ -63,6 +65,14 @@ pub fn transitions(
                 && before.is_some_and(|before| before.review != Review::Approved);
             if newly_approved {
                 notices.push(approval_notice(pull));
+            }
+
+            // GitHub re-targets a stacked PR when the one under it merges;
+            // that is when a draft on top gets published and re-checked.
+            if let Some(before) = before
+                && before.base != pull.base
+            {
+                notices.push(retarget_notice(pull, &before.base));
             }
 
             // Every milestone the run reached since the last poll is news. A new
@@ -87,6 +97,15 @@ pub fn transitions(
 
 fn subtitle(pull: &PullRequest) -> String {
     format!("{} #{}", pull.repo_name(), pull.number)
+}
+
+fn retarget_notice(pull: &PullRequest, from: &str) -> Notice {
+    Notice {
+        title: format!("#{} ahora apunta a {}", pull.number, pull.base),
+        subtitle: format!("{} · antes a {from}", pull.repo_name()),
+        body: pull.title.clone(),
+        url: pull.url.clone(),
+    }
 }
 
 fn approval_notice(pull: &PullRequest) -> Notice {
@@ -380,6 +399,21 @@ mod tests {
         assert_eq!(notices[0].title, "✓ PR aprobado");
         assert_eq!(notices[0].body, "Por @ana: Registrar la redirección");
         assert!(again.is_empty());
+    }
+
+    #[test]
+    fn a_pr_retargeted_to_another_base_notifies() {
+        let stacked = PullRequest {
+            base: "feat/below".to_string(),
+            ..reviewed(Review::Required)
+        };
+        let (_, baseline) = transitions(None, &[stacked]);
+
+        let (notices, _) = transitions(Some(&baseline), &[reviewed(Review::Required)]);
+
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].title, "#539 ahora apunta a master");
+        assert_eq!(notices[0].subtitle, "payments · antes a feat/below");
     }
 
     #[test]
