@@ -320,6 +320,9 @@ struct Root {
     threads_open: HashSet<String>,
     /// Where the board is scrolled to, for its scrollbar.
     board_scroll: gpui::ScrollHandle,
+    /// Whether the scrollbar's thumb is being dragged; hover doesn't count
+    /// during a drag, and the bar must not vanish under the cursor.
+    board_dragging: bool,
     /// When a review was last asked for through Slack, by PR URL, in seconds
     /// since the epoch.
     review_asked: HashMap<String, i64>,
@@ -345,6 +348,7 @@ impl Root {
             opening_agent: None,
             threads_open: HashSet::new(),
             board_scroll: gpui::ScrollHandle::new(),
+            board_dragging: false,
             review_asked: HashMap::new(),
             focus_handle: cx.focus_handle(),
         };
@@ -1802,7 +1806,15 @@ impl Root {
         let offset = (along * content - viewport / 2.).clamp(0., content - viewport);
         self.board_scroll
             .set_offset(Point::new(px(-offset), px(0.)));
+        self.board_dragging = true;
         cx.notify();
+    }
+
+    fn stop_dragging(&mut self, cx: &mut Context<Self>) {
+        if self.board_dragging {
+            self.board_dragging = false;
+            cx.notify();
+        }
     }
 
     /// A thin horizontal scrollbar under the columns, shown while the mouse
@@ -1825,7 +1837,7 @@ impl Root {
             .flex_shrink_0()
             .rounded_full()
             .when(needed, |this| {
-                this.opacity(0.)
+                this.opacity(if self.board_dragging { 1. } else { 0. })
                     .group_hover("board", |style| style.opacity(1.))
                     .bg(rgb(theme::MANTLE))
                     .child(
@@ -2585,6 +2597,15 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &ShowMine, _window, cx| this.show(Tab::Mine, cx)))
             .on_action(cx.listener(|this, _: &ShowMerged, _window, cx| this.show(Tab::Merged, cx)))
             .on_key_down(cx.listener(|this, event, _window, cx| this.edit_key(event, cx)))
+            // Letting go of the scrollbar's thumb, anywhere.
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| this.stop_dragging(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| this.stop_dragging(cx)),
+            )
             .flex()
             .flex_col()
             .gap_3()
