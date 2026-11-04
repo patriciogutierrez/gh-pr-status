@@ -30,10 +30,10 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnimationExt, App, Application, Bounds, ClipboardItem, Context, FocusHandle, Focusable,
-    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, anchored, deferred, div,
-    prelude::*, px, rgb, size,
+    AnimationExt, App, Application, Bounds, ClipboardItem, Context, ElementId, FocusHandle,
+    Focusable, FontWeight, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point,
+    SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, anchored,
+    deferred, div, prelude::*, px, rgb, size,
 };
 
 use github::{PullRequest, Review, Snapshot};
@@ -302,8 +302,6 @@ struct Root {
     sidebar_width: f32,
     /// The group whose agent is being opened in Orca.
     opening_agent: Option<i64>,
-    /// The board card under the mouse, which shows its buttons.
-    hovered_card: Option<String>,
     /// Board columns whose merged PRs are unfolded.
     merged_open: HashSet<i64>,
     focus_handle: FocusHandle,
@@ -326,7 +324,6 @@ impl Root {
             hovered: None,
             sidebar_width: SIDEBAR_WIDTH,
             opening_agent: None,
-            hovered_card: None,
             merged_open: HashSet::new(),
             focus_handle: cx.focus_handle(),
         };
@@ -640,6 +637,7 @@ impl Root {
                 div()
                     .w(px(1.))
                     .h_full()
+                    .bg(rgb(theme::SURFACE))
                     .group_hover("sidebar-handle", |style| style.bg(rgb(theme::BORDER))),
             )
     }
@@ -876,90 +874,102 @@ impl Root {
         .detach();
     }
 
-    /// The buttons to the right of a PR: ask for a review on Slack until the PR
-    /// is approved, and comment `/deploy` unless a run is already going. Only
-    /// on the user's own PRs.
-    fn actions(&self, pull: &PullRequest, cx: &mut Context<Self>) -> impl IntoElement {
-        let mine = pull.author == self.login().unwrap_or_default();
-        let slack =
-            slack_channel().filter(|_| mine && !pull.draft && pull.review != Review::Approved);
-        let deploying = pull
-            .pipeline
-            .as_ref()
-            .is_some_and(|run| run.state(now()) == State::Running);
-        let deploy = self.deploys.get(&pull.url);
-        let below = stack::below(pull, self.mine.pulls());
-        let task = status::action(pull, below, now()).task.filter(|_| mine);
-        let asking = self.opening_agent.is_some();
-        let deploy_label = match deploy {
-            Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR => "¿Enviar /deploy?",
-            Some(Deploy::Sending) => "Enviando…",
-            _ => "/deploy",
-        };
-        let url = pull.url.clone();
-        let asked = pull.url.clone();
-
-        div()
-            .flex()
-            .flex_shrink_0()
-            .gap_1()
-            .when(task.is_some(), |this| {
-                this.child(ui::button(
-                    SharedString::from(format!("ask-{}", pull.url)),
-                    if asking {
-                        "Pidiendo…"
+    /// A PR's menu: hand its next action to the group's agent, ask for a
+    /// review on Slack, comment `/deploy` (two clicks: the first asks), open
+    /// each failed check's logs, copy its URL and take it out of its group.
+    /// Slack and `/deploy` only on the user's own open PRs.
+    fn pull_menu(&self, url: &str, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let mut items = Vec::new();
+        let now = now();
+        if let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) {
+            let mine = pull.author == self.login().unwrap_or_default();
+            let action = status::action(pull, stack::below(pull, self.mine.pulls()), now);
+            if let Some(task) = action.task.filter(|_| mine) {
+                let asked = url.to_string();
+                items.push(menu_item(
+                    "menu-ask",
+                    if self.opening_agent.is_some() {
+                        "Pidiendo al agente…".to_string()
                     } else {
-                        "Pedir al agente"
+                        format!("Pedir al agente: {task}")
                     },
-                    !asking,
                     cx.listener(move |this, _event, _window, cx| this.ask_agent(&asked, cx)),
-                ))
-            })
-            .when_some(slack, |this, channel| {
-                let pull_url = pull.url.clone();
-                this.child(ui::button(
-                    SharedString::from(format!("slack-{}", pull.url)),
-                    "Slack",
-                    true,
+                ));
+            }
+            let slack =
+                slack_channel().filter(|_| mine && !pull.draft && pull.review != Review::Approved);
+            if let Some(channel) = slack {
+                let copied = url.to_string();
+                items.push(menu_item(
+                    "menu-slack",
+                    "Pedir review en Slack",
                     move |_event, _window, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(pull_url.clone()));
+                        cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
                         cx.open_url(channel);
                     },
-                ))
-            })
-            .when(mine && !pull.draft && !deploying, |this| {
-                this.child(ui::button(
-                    SharedString::from(format!("deploy-{}", pull.url)),
-                    deploy_label,
-                    !matches!(deploy, Some(Deploy::Sending)),
-                    cx.listener(move |this, _event, _window, cx| this.deploy(&url, cx)),
-                ))
-            })
+                ));
+            }
+            let deploying = pull
+                .pipeline
+                .as_ref()
+                .is_some_and(|run| run.state(now) == State::Running);
+            if mine && !pull.draft && !deploying {
+                let label = match self.deploys.get(url) {
+                    Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR => {
+                        "¿Enviar /deploy? Clic de nuevo para confirmar"
+                    }
+                    Some(Deploy::Sending) => "Enviando /deploy…",
+                    _ => "Comentar /deploy",
+                };
+                let target = url.to_string();
+                items.push(menu_item(
+                    "menu-deploy",
+                    label,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.deploy(&target, cx);
+                        // The first click only asks; keep the menu open for
+                        // the one that confirms.
+                        if matches!(this.deploys.get(&target), Some(Deploy::Confirming(_))) {
+                            cx.stop_propagation();
+                        }
+                    }),
+                ));
+            }
+            for (index, check) in pull.failing_checks.iter().enumerate() {
+                if let Some(logs) = check.url.clone() {
+                    items.push(menu_item(
+                        SharedString::from(format!("menu-logs-{index}")),
+                        format!("Ver logs de {}", check.name),
+                        move |_event, _window, cx| cx.open_url(&logs),
+                    ));
+                }
+            }
+        }
+
+        let copied = url.to_string();
+        items.push(menu_item(
+            "menu-copy-url",
+            "Copiar URL del PR",
+            move |_event, _window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+            },
+        ));
+        if self.folders.by_url.contains_key(url) {
+            let url = url.to_string();
+            items.push(menu_item(
+                "menu-ungroup",
+                "Sacar del grupo",
+                cx.listener(move |this, _event, _window, cx| this.move_to(&url, None, cx)),
+            ));
+        }
+        items
     }
 
     /// The right-click menu, drawn over everything at the click. Any click
     /// outside it closes it.
     fn menu(&self, menu: &Menu, cx: &mut Context<Self>) -> impl IntoElement {
         let items: Vec<_> = match &menu.target {
-            MenuFor::Pull(url) => {
-                let copied = url.clone();
-                let mut items = vec![menu_item(
-                    "menu-copy-url",
-                    "Copiar URL del PR",
-                    cx.listener(move |_this, _event, _window, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-                    }),
-                )];
-                if self.folders.by_url.contains_key(url) {
-                    let url = url.clone();
-                    items.push(menu_item(
-                        "menu-ungroup",
-                        "Sacar del grupo",
-                        cx.listener(move |this, _event, _window, cx| this.move_to(&url, None, cx)),
-                    ));
-                }
-                items
-            }
+            MenuFor::Pull(url) => self.pull_menu(url, cx),
             MenuFor::Folder(id) => {
                 let id = *id;
                 let subgroup = self
@@ -1153,7 +1163,7 @@ impl Root {
                         this.move_to(&dragged.url, None, cx)
                     })),
             )
-            .child(div().h(px(1.)).my_1().bg(rgb(theme::BORDER)))
+            .child(div().h(px(6.)))
             .children(folders)
             .child(match new_name {
                 Some(text) => self.name_field(text, false, cx).into_any_element(),
@@ -1162,8 +1172,6 @@ impl Root {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .border_1()
-                    .border_color(rgb(theme::BASE))
                     .text_sm()
                     .text_color(rgb(theme::MUTED))
                     .cursor_pointer()
@@ -1252,11 +1260,9 @@ impl Root {
             .px_2()
             .py_1()
             .rounded_md()
-            .border_1()
-            .border_color(rgb(theme::BASE))
             .text_sm()
             .cursor_pointer()
-            .when(selected, |this| this.bg(rgb(theme::SURFACE_ACTIVE)))
+            .when(selected, |this| this.bg(rgb(theme::SURFACE)))
             .text_color(rgb(if selected {
                 theme::ACCENT
             } else {
@@ -1398,7 +1404,10 @@ impl Root {
 
         div()
             .flex()
-            .gap_2()
+            .gap_0p5()
+            .p(px(3.))
+            .rounded_lg()
+            .bg(rgb(theme::MANTLE))
             .child(ui::toggle_button(
                 "tab-mine",
                 format!("Mis PRs{}", count(&self.mine)),
@@ -1604,6 +1613,7 @@ impl Root {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_x_scroll()
+                    .map(own_axis_only)
                     .children(columns),
             )
     }
@@ -1693,6 +1703,7 @@ impl Root {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_y_scroll()
+                    .map(own_axis_only)
                     .children(cards)
                     .when(!shipped.is_empty(), |this| {
                         this.child(
@@ -1726,77 +1737,6 @@ impl Root {
                             )
                         })
                     }),
-            )
-    }
-
-    /// A PR on the board: the row's content packed for a narrow column. Its
-    /// buttons show while the mouse is over it, or while a `/deploy` is going.
-    fn card(&self, pull: &PullRequest, stripe: u32, cx: &mut Context<Self>) -> impl IntoElement {
-        let expanded = self.expanded.contains(&pull.url);
-        let url = pull.url.clone();
-        let show_actions = self.hovered_card.as_deref() == Some(pull.url.as_str())
-            || self.deploys.contains_key(&pull.url);
-
-        div()
-            .id(SharedString::from(format!("card-{}", pull.url)))
-            .on_drag(
-                Dragged {
-                    url: pull.url.clone(),
-                    title: pull.title.clone().into(),
-                },
-                drag_preview,
-            )
-            .on_hover(cx.listener(move |this, hovering: &bool, _window, cx| {
-                if *hovering {
-                    this.hovered_card = Some(url.clone());
-                } else if this.hovered_card.as_deref() == Some(url.as_str()) {
-                    this.hovered_card = None;
-                }
-                cx.notify();
-            }))
-            .flex()
-            .gap_2()
-            .p_2()
-            .rounded_lg()
-            .bg(rgb(theme::SURFACE))
-            .child(div().w(px(3.)).flex_shrink_0().rounded_sm().bg(rgb(stripe)))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .child(
-                        div()
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                self.open_menu(MenuFor::Pull(pull.url.clone()), cx),
-                            )
-                            .child(card_summary(pull, self.mine.pulls())),
-                    )
-                    .when(!pull.failing_checks.is_empty(), |this| {
-                        this.child(failures(pull))
-                    })
-                    .when_some(
-                        match self.deploys.get(&pull.url) {
-                            Some(Deploy::Failed(error)) => Some(error.clone()),
-                            _ => None,
-                        },
-                        |this, error| {
-                            this.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme::RED))
-                                    .child(format!("No se pudo enviar /deploy: {error}")),
-                            )
-                        },
-                    )
-                    .when_some(pull.pipeline.as_ref(), |this, run| {
-                        this.child(self.pipeline_bar(pull, run, expanded, cx))
-                            .when(expanded, |this| this.child(steps(pull, run)))
-                    })
-                    .when(show_actions, |this| this.child(self.actions(pull, cx))),
             )
     }
 
@@ -1933,14 +1873,38 @@ impl Root {
         })
     }
 
-    /// One PR. The colored stripe repeats the section's color so a row keeps its
-    /// meaning when scrolled away from the heading. The PR and its pipeline are
-    /// separate click targets: one opens GitHub, the other unfolds the run.
-    fn row(&self, pull: &PullRequest, stripe: u32, cx: &mut Context<Self>) -> impl IntoElement {
+    /// One PR in the list.
+    fn row(&self, pull: &PullRequest, color: u32, cx: &mut Context<Self>) -> impl IntoElement {
+        self.pull_block(pull, color, false, cx)
+    }
+
+    /// One PR on the board, packed for a narrow column.
+    fn card(&self, pull: &PullRequest, color: u32, cx: &mut Context<Self>) -> impl IntoElement {
+        self.pull_block(pull, color, true, cx)
+    }
+
+    /// A PR: its title behind the state's dot, its next action as the one
+    /// colored pill, the rest of its state in a muted line, the stack or
+    /// twin it has, and its pipeline. Clicking the title opens the PR on
+    /// GitHub; "⋯", shown while the mouse is over the PR, and a right click
+    /// open its menu. Dragging it onto a group moves it there.
+    fn pull_block(
+        &self,
+        pull: &PullRequest,
+        color: u32,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let now = now();
+        let pulls = self.mine.pulls();
         let expanded = self.expanded.contains(&pull.url);
+        let action = status::action(pull, stack::below(pull, pulls), now);
+        let group = SharedString::from(format!("pull-{}", pull.url));
+        let open = pull.url.clone();
 
         div()
-            .id(SharedString::from(format!("row-{}", pull.url)))
+            .id(group.clone())
+            .group(group.clone())
             .on_drag(
                 Dragged {
                     url: pull.url.clone(),
@@ -1948,58 +1912,129 @@ impl Root {
                 },
                 drag_preview,
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                self.open_menu(MenuFor::Pull(pull.url.clone()), cx),
+            )
             .flex()
-            .gap_3()
-            .p_2()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
             .rounded_lg()
-            .bg(rgb(theme::SURFACE))
-            .child(div().w(px(3.)).flex_shrink_0().rounded_sm().bg(rgb(stripe)))
+            .hover(|style| style.bg(rgb(theme::ROW_HOVER)))
             .child(
                 div()
                     .flex()
-                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(8.))
+                            .h(px(8.))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(rgb(color)),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("open-{}", pull.url)))
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(if pull.draft {
+                                theme::SUBTEXT
+                            } else {
+                                theme::TEXT
+                            }))
+                            .cursor_pointer()
+                            .when(compact, |this| this.line_clamp(2))
+                            .when(!compact, |this| this.truncate())
+                            .on_click(move |_event, _window, cx| cx.open_url(&open))
+                            .child(pull.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("more-{}", pull.url)))
+                            .flex_shrink_0()
+                            .px_1()
+                            .rounded_md()
+                            .text_sm()
+                            .text_color(rgb(theme::MUTED))
+                            .cursor_pointer()
+                            .opacity(0.)
+                            .group_hover(group.clone(), |style| style.opacity(1.))
+                            .hover(|style| {
+                                style.bg(rgb(theme::SURFACE)).text_color(rgb(theme::TEXT))
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                self.open_menu(MenuFor::Pull(pull.url.clone()), cx),
+                            )
+                            .child("⋯"),
+                    ),
+            )
+            .child(
+                // The action, then the rest of the state and the age: on one
+                // line, or under the action in a narrow card.
+                div()
+                    .flex()
+                    .when(compact, |this| this.flex_col().items_start())
+                    .when(!compact, |this| this.items_center())
                     .gap_1()
-                    .flex_1()
-                    .min_w(px(0.))
+                    .pl(px(16.))
+                    .text_xs()
+                    .text_color(rgb(theme::MUTED))
+                    .child(ui::pill(action.label, action.color))
                     .child(
                         div()
                             .flex()
+                            .items_center()
                             .gap_2()
-                            .items_start()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .when(compact, |this| this.w_full())
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w(px(0.))
-                                    .on_mouse_down(
-                                        MouseButton::Right,
-                                        self.open_menu(MenuFor::Pull(pull.url.clone()), cx),
-                                    )
-                                    .child(summary(pull, self.mine.pulls())),
+                                    .truncate()
+                                    .child(meta(pull, compact)),
                             )
-                            .child(self.actions(pull, cx)),
-                    )
-                    .when(!pull.failing_checks.is_empty(), |this| {
-                        this.child(failures(pull))
-                    })
-                    .when_some(
-                        match self.deploys.get(&pull.url) {
-                            Some(Deploy::Failed(error)) => Some(error.clone()),
-                            _ => None,
-                        },
-                        |this, error| {
-                            this.child(
+                            .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(rgb(theme::RED))
-                                    .child(format!("No se pudo enviar /deploy: {error}")),
-                            )
-                        },
-                    )
-                    .when_some(pull.pipeline.as_ref(), |this, run| {
-                        this.child(self.pipeline_bar(pull, run, expanded, cx))
-                            .when(expanded, |this| this.child(steps(pull, run)))
-                    }),
+                                    .flex_shrink_0()
+                                    .child(status::ago(now - pull.updated_at)),
+                            ),
+                    ),
             )
+            .children(relations(pull, pulls))
+            .when_some(
+                match self.deploys.get(&pull.url) {
+                    Some(Deploy::Failed(error)) => Some(error.clone()),
+                    _ => None,
+                },
+                |this, error| {
+                    this.child(
+                        div()
+                            .pl(px(16.))
+                            .text_xs()
+                            .text_color(rgb(theme::RED))
+                            .child(format!("No se pudo enviar /deploy: {error}")),
+                    )
+                },
+            )
+            .when_some(pull.pipeline.as_ref(), |this, run| {
+                this.child(
+                    div()
+                        .pl(px(16.))
+                        .child(self.pipeline_bar(pull, run, expanded, cx)),
+                )
+                .when(expanded, |this| {
+                    this.child(div().pl(px(16.)).child(steps(pull, run)))
+                })
+            })
     }
 
     /// The collapsed pipeline line: state, the step worth reading, and when.
@@ -2135,8 +2170,8 @@ fn drop_highlight(style: gpui::StyleRefinement) -> gpui::StyleRefinement {
 }
 
 fn menu_item(
-    id: &'static str,
-    label: &'static str,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::AnyElement {
     div()
@@ -2146,7 +2181,7 @@ fn menu_item(
         .rounded_md()
         .cursor_pointer()
         .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
-        .child(label)
+        .child(label.into())
         .on_click(on_click)
         .into_any_element()
 }
@@ -2170,6 +2205,15 @@ fn message(text: impl Into<SharedString>, color: u32) -> impl IntoElement {
         .text_sm()
         .text_color(rgb(color))
         .child(text.into())
+}
+
+/// Makes a scrollable area ignore wheel deltas on the other axis. By default
+/// GPUI turns a vertical wheel into sideways scrolling on a horizontal area
+/// and the reverse, so the board and the column under the mouse would both
+/// move on every wheel. GPUI 0.2 has no setter for this.
+fn own_axis_only<E: Styled>(mut element: E) -> E {
+    element.style().restrict_scroll_to_axis = Some(true);
+    element
 }
 
 /// The scrolling area both tabs draw into.
@@ -2206,142 +2250,29 @@ fn section(title: &str, color: u32, rows: Vec<gpui::AnyElement>) -> impl IntoEle
         .children(rows)
 }
 
-/// Repo, branches, title and badges. Clicking it opens the PR on GitHub.
-fn summary(pull: &PullRequest, pulls: &[PullRequest]) -> impl IntoElement {
-    let url = pull.url.clone();
-    let context = format!(
-        "{} #{} · {} ← {}",
-        pull.repo_name(),
-        pull.number,
-        pull.base,
-        pull.head
-    );
-
-    div()
-        .id(SharedString::from(format!("open-{}", pull.url)))
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_1()
-        .rounded_md()
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
-        .active(|style| style.bg(rgb(theme::SURFACE_ACTIVE)))
-        .on_click(move |_event, _window, cx| cx.open_url(&url))
-        .child(
-            div()
-                .flex()
-                .gap_3()
-                .text_xs()
-                .text_color(rgb(theme::MUTED))
-                .child(div().flex_1().min_w(px(0.)).truncate().child(context))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .child(status::ago(now() - pull.updated_at)),
-                ),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(theme::TEXT))
-                .truncate()
-                .child(pull.title.clone()),
-        )
-        .child(action_line(pull, pulls))
-        .children(relations(pull, pulls))
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_1()
-                .items_center()
-                .children(
-                    status::badges(pull)
-                        .into_iter()
-                        .map(|badge| ui::badge(badge.label, badge.color)),
-                )
-                .when(pull.comments > 0, |this| {
-                    this.child(ui::badge(format!("💬 {}", pull.comments), theme::SUBTEXT))
-                }),
-        )
-}
-
-/// A board card's top: repo, number and age, the title in up to two lines,
-/// and the badges. Clicking it opens the PR on GitHub.
-fn card_summary(pull: &PullRequest, pulls: &[PullRequest]) -> impl IntoElement {
-    let url = pull.url.clone();
-
-    div()
-        .id(SharedString::from(format!("open-{}", pull.url)))
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_1()
-        .rounded_md()
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
-        .active(|style| style.bg(rgb(theme::SURFACE_ACTIVE)))
-        .on_click(move |_event, _window, cx| cx.open_url(&url))
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .text_xs()
-                .text_color(rgb(theme::MUTED))
-                .child(div().flex_1().min_w(px(0.)).truncate().child(format!(
-                    "{} #{}",
-                    pull.repo_name(),
-                    pull.number
-                )))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .child(status::ago(now() - pull.updated_at)),
-                ),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(theme::TEXT))
-                .line_clamp(2)
-                .child(pull.title.clone()),
-        )
-        .child(action_line(pull, pulls))
-        .children(relations(pull, pulls))
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_1()
-                .items_center()
-                .children(
-                    status::badges(pull)
-                        .into_iter()
-                        .map(|badge| ui::badge(badge.label, badge.color)),
-                )
-                .when(pull.comments > 0, |this| {
-                    this.child(ui::badge(format!("💬 {}", pull.comments), theme::SUBTEXT))
-                }),
-        )
-}
-
-/// The PR's next action, in its color, so the eye finds the verb first.
-fn action_line(pull: &PullRequest, pulls: &[PullRequest]) -> impl IntoElement {
-    let action = status::action(pull, stack::below(pull, pulls), now());
-    div()
-        .flex()
-        .gap_1()
-        .text_xs()
-        .text_color(rgb(action.color))
-        .child("→")
-        .child(div().flex_1().min_w(px(0.)).truncate().child(action.label))
+/// The rest of a PR's state after its action, in one muted line: repo and
+/// number, CI, review, conflicts, draft, comments and, unless `compact`, the
+/// branches.
+fn meta(pull: &PullRequest, compact: bool) -> String {
+    let mut parts = vec![format!("{} #{}", pull.repo_name(), pull.number)];
+    parts.extend(status::badges(pull).into_iter().map(|badge| badge.label));
+    match pull.comments {
+        0 => {}
+        1 => parts.push("1 comentario".to_string()),
+        n => parts.push(format!("{n} comentarios")),
+    }
+    // Last, since it is the longest and the first to be cut.
+    if !compact {
+        parts.push(format!("{} → {}", pull.head, pull.base));
+    }
+    parts.join(" · ")
 }
 
 /// The stack the PR is in and its [MASTER]/[DEV] twin, when it has them.
 fn relations(pull: &PullRequest, pulls: &[PullRequest]) -> Vec<gpui::AnyElement> {
     let line = |text: String| {
         div()
+            .pl(px(16.))
             .text_xs()
             .text_color(rgb(theme::MUTED))
             .truncate()
@@ -2369,57 +2300,6 @@ fn relations(pull: &PullRequest, pulls: &[PullRequest]) -> Vec<gpui::AnyElement>
         )));
     }
     lines
-}
-
-/// Every failed check with why it failed; clicking one opens its logs.
-fn failures(pull: &PullRequest) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_0p5()
-        .p_1()
-        .rounded_md()
-        .bg(rgb(theme::MANTLE))
-        .text_xs()
-        .children(
-            pull.failing_checks
-                .iter()
-                .enumerate()
-                .map(|(index, check)| {
-                    let url = check.url.clone();
-                    div()
-                        .id(SharedString::from(format!("check-{index}-{}", pull.url)))
-                        .flex()
-                        .gap_2()
-                        .px_1()
-                        .rounded_sm()
-                        .when_some(url, |this, url| {
-                            this.cursor_pointer()
-                                .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
-                                .on_click(move |_event, _window, cx| cx.open_url(&url))
-                        })
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_color(rgb(theme::RED))
-                                .child(format!("✗ {}", check.name)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .truncate()
-                                .text_color(rgb(theme::SUBTEXT))
-                                .child(check.reason.clone().unwrap_or_else(|| {
-                                    if check.url.is_some() {
-                                        "ver logs".to_string()
-                                    } else {
-                                        String::new()
-                                    }
-                                })),
-                        )
-                }),
-        )
 }
 
 /// The unfolded run: every error plus the latest steps, oldest first, and a
@@ -2545,7 +2425,7 @@ impl Render for Root {
             )
             .when_some(self.menu.as_ref(), |this, menu| this.child(self.menu(menu, cx)))
             .child(div().text_xs().text_color(rgb(theme::MUTED)).child(
-                "clic abre el PR · arrástralo a un grupo · clic derecho para más · cmd-r actualiza · cmd-1/2 pestañas",
+                "clic en el título abre el PR · ⋯ o clic derecho: acciones · arrástralo a un grupo · cmd-r actualiza · cmd-1/2 pestañas",
             ))
     }
 }
