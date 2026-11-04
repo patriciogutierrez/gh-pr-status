@@ -179,7 +179,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
 - **El menú del PR**, con el «⋯» que aparece al pasar el mouse o con clic derecho, reúne sus
   acciones: pedir al agente, pedir review en Slack, comentar `/deploy`, ver los logs de cada
   check fallido, copiar la URL y sacarlo del grupo.
-- **Pedir review en Slack…** abre un formulario sobre la app: reviewer (de la lista de
+- **Pedir review en Slack…** abre un formulario en una ventana aparte: reviewer (de la lista de
   `GH_PR_STATUS_REVIEWERS`), urgencia (highest, high, medium, low), canal, comentario, y el
   link del PR ya puesto. «Enviar a Slack» (o enter) hace un `POST` al webhook del workflow de
   review del equipo, que publica el pedido con su botón «aprobar»; tú vas como requester. La
@@ -285,6 +285,7 @@ cargo clippy --all-targets
 | `src/notify.rs` | Detecta hitos de deploy y PRs aprobados, y manda la notificación de macOS |
 | `src/tool.rs` | Encuentra `gh` y los notificadores aunque la app no herede el `PATH` del shell |
 | `src/review.rs` | El pedido de review por el webhook del workflow de Slack y su configuración |
+| `src/review_view.rs` | La ventana del formulario de review |
 | `src/stack.rs` | Stacks de PRs (base sobre la rama de otro) y gemelas [MASTER]/[DEV] |
 | `src/status.rs` | En qué grupo cae un PR, sus badges y el "hace N min" |
 | `src/ui.rs` | Botones, pestañas, el pill de la acción y los badges del pipeline |

@@ -19,6 +19,7 @@ mod notify;
 mod orca;
 mod pipeline;
 mod review;
+mod review_view;
 mod stack;
 mod status;
 mod theme;
@@ -31,10 +32,10 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnimationExt, App, Application, Bounds, ClipboardItem, Context, ElementId, FocusHandle,
-    Focusable, FontWeight, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point,
-    SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, anchored,
-    deferred, div, prelude::*, px, rgb, size,
+    AnimationExt, App, Application, Bounds, ClipboardItem, Context, FocusHandle, Focusable,
+    FontWeight, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, anchored, deferred, div,
+    prelude::*, px, rgb, size,
 };
 
 use github::{PullRequest, Review, Snapshot};
@@ -121,28 +122,6 @@ enum Deploy {
 enum MenuFor {
     Pull(String),
     Folder(i64),
-    /// One of the review form's choices, listing its options.
-    Pick(Field),
-}
-
-/// The review form's choices.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum Field {
-    Reviewer,
-    Urgency,
-    Channel,
-}
-
-/// The review request being filled in for a PR.
-struct ReviewForm {
-    url: String,
-    title: String,
-    reviewer: usize,
-    urgency: usize,
-    channel: usize,
-    comment: String,
-    sending: bool,
-    error: Option<String>,
 }
 
 /// The menu a right click opens, where the click happened.
@@ -329,8 +308,6 @@ struct Root {
     merged_open: HashSet<i64>,
     /// PRs whose review threads are unfolded, by URL.
     threads_open: HashSet<String>,
-    /// The review request being filled in, while the form is open.
-    review: Option<ReviewForm>,
     /// When a review was last asked for through Slack, by PR URL.
     review_asked: HashMap<String, Instant>,
     focus_handle: FocusHandle,
@@ -355,7 +332,6 @@ impl Root {
             opening_agent: None,
             merged_open: HashSet::new(),
             threads_open: HashSet::new(),
-            review: None,
             review_asked: HashMap::new(),
             focus_handle: cx.focus_handle(),
         };
@@ -571,303 +547,18 @@ impl Root {
         .detach();
     }
 
-    /// Opens the review form for the PR, with the first reviewer, "high"
-    /// and the first channel chosen.
+    /// Opens the review form for the PR in its own window.
     fn open_review(&mut self, url: &str, cx: &mut Context<Self>) {
         let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) else {
             return;
         };
-        self.review = Some(ReviewForm {
-            url: pull.url.clone(),
-            title: pull.title.clone(),
-            reviewer: 0,
-            urgency: 1,
-            channel: 0,
-            comment: String::new(),
-            sending: false,
-            error: None,
-        });
-        cx.notify();
-    }
-
-    /// Typing into the form's comment: enter sends, escape closes.
-    fn form_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let Some(form) = self.review.as_mut() else {
-            return;
-        };
-        let keystroke = &event.keystroke;
-        match keystroke.key.as_str() {
-            "enter" if !form.sending => self.send_review(cx),
-            "escape" if !form.sending => self.review = None,
-            "backspace" => {
-                form.comment.pop();
-            }
-            _ if keystroke.modifiers.platform || keystroke.modifiers.control => return,
-            _ => match &keystroke.key_char {
-                Some(typed) if !typed.chars().any(char::is_control) => {
-                    form.comment.push_str(typed);
-                }
-                _ => return,
-            },
-        }
-        cx.stop_propagation();
-        cx.notify();
-    }
-
-    /// Posts the form to the workflow; the form closes once Slack accepts it.
-    fn send_review(&mut self, cx: &mut Context<Self>) {
         let Some(config) = review::config() else {
             return;
         };
-        let Some(form) = self.review.as_mut() else {
-            return;
-        };
-        let (Some(reviewer), Some(channel)) = (
-            config.reviewers.get(form.reviewer),
-            config.channels.get(form.channel),
-        ) else {
-            return;
-        };
-        let request = review::Request {
-            reviewer: reviewer.id.clone(),
-            channel: channel.id.clone(),
-            urgency: review::URGENCIES[form.urgency].1.to_string(),
-            comment: form.comment.trim().to_string(),
-            pr_url: form.url.clone(),
-        };
-        form.sending = true;
-        form.error = None;
+        let (url, title) = (pull.url.clone(), pull.title.clone());
+        let root = cx.entity().downgrade();
+        self.folders_error = review_view::open(root, config, url, title, cx).err();
         cx.notify();
-
-        let url = form.url.clone();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { review::send(&config, &request) })
-                .await;
-
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => {
-                        this.review = None;
-                        this.review_asked.insert(url, Instant::now());
-                    }
-                    Err(error) => {
-                        if let Some(form) = this.review.as_mut() {
-                            form.sending = false;
-                            form.error = Some(error);
-                        }
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// The options of one of the form's choices; picking one sets it.
-    fn pick_menu(&self, field: Field, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let config = review::config();
-        let names: Vec<String> = match (field, &config) {
-            (Field::Reviewer, Some(config)) => {
-                config.reviewers.iter().map(|c| c.name.clone()).collect()
-            }
-            (Field::Channel, Some(config)) => config
-                .channels
-                .iter()
-                .map(|c| format!("#{}", c.name))
-                .collect(),
-            (Field::Urgency, _) => review::URGENCIES
-                .iter()
-                .map(|(word, _)| word.to_string())
-                .collect(),
-            _ => Vec::new(),
-        };
-        names
-            .into_iter()
-            .enumerate()
-            .map(|(index, name)| {
-                menu_item(
-                    SharedString::from(format!("pick-{index}")),
-                    name,
-                    cx.listener(move |this, _event, _window, cx| {
-                        if let Some(form) = this.review.as_mut() {
-                            match field {
-                                Field::Reviewer => form.reviewer = index,
-                                Field::Urgency => form.urgency = index,
-                                Field::Channel => form.channel = index,
-                            }
-                        }
-                        cx.notify();
-                    }),
-                )
-            })
-            .collect()
-    }
-
-    /// The review form, over everything: who, how urgent, where, a comment,
-    /// and the PR it is for. Enter sends, escape or "Cancelar" closes.
-    fn review_form(&self, form: &ReviewForm, cx: &mut Context<Self>) -> impl IntoElement {
-        let config = review::config();
-        let name = |field: Field| -> String {
-            match (field, &config) {
-                (Field::Reviewer, Some(config)) => config
-                    .reviewers
-                    .get(form.reviewer)
-                    .map(|c| c.name.clone())
-                    .unwrap_or_default(),
-                (Field::Channel, Some(config)) => config
-                    .channels
-                    .get(form.channel)
-                    .map(|c| format!("#{}", c.name))
-                    .unwrap_or_default(),
-                (Field::Urgency, _) => review::URGENCIES[form.urgency].0.to_string(),
-                _ => String::new(),
-            }
-        };
-        let mut choice = |label: &'static str, field: Field| {
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(
-                    div()
-                        .w(px(80.))
-                        .text_xs()
-                        .text_color(rgb(theme::MUTED))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("choice-{label}")))
-                        .flex()
-                        .flex_1()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(theme::SURFACE))
-                        .text_sm()
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(theme::SURFACE)))
-                        .on_mouse_down(MouseButton::Left, self.open_menu(MenuFor::Pick(field), cx))
-                        .child(div().flex_1().truncate().child(name(field)))
-                        .child(div().text_xs().text_color(rgb(theme::MUTED)).child("▾")),
-                )
-        };
-
-        deferred(
-            div()
-                .id("review-overlay")
-                .occlude()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(gpui::rgba(0x1e1e2ecc))
-                .child(
-                    div()
-                        .id("review-form")
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .w(px(440.))
-                        .p_4()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(rgb(theme::BORDER))
-                        .bg(rgb(theme::MANTLE))
-                        .shadow_lg()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child("Pedir review"),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(theme::SUBTEXT))
-                                .truncate()
-                                .child(form.title.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(theme::MUTED))
-                                .truncate()
-                                .child(form.url.clone()),
-                        )
-                        .child(choice("Reviewer", Field::Reviewer))
-                        .child(choice("Urgencia", Field::Urgency))
-                        .child(choice("Canal", Field::Channel))
-                        .child(
-                            div()
-                                .flex()
-                                .items_start()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .w(px(80.))
-                                        .pt_1()
-                                        .text_xs()
-                                        .text_color(rgb(theme::MUTED))
-                                        .child("Comentario"),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_h(px(56.))
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_md()
-                                        .border_1()
-                                        .border_color(rgb(theme::ACCENT))
-                                        .bg(rgb(theme::BASE))
-                                        .text_sm()
-                                        .child(if form.comment.is_empty() {
-                                            div()
-                                                .text_color(rgb(theme::MUTED))
-                                                .child("Escribe aquí▏")
-                                        } else {
-                                            div().child(format!("{}▏", form.comment))
-                                        }),
-                                ),
-                        )
-                        .when_some(form.error.clone(), |this, error| {
-                            this.child(div().text_xs().text_color(rgb(theme::RED)).child(error))
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .gap_2()
-                                .child(ui::button(
-                                    "review-cancel",
-                                    "Cancelar",
-                                    !form.sending,
-                                    cx.listener(|this, _event, _window, cx| {
-                                        this.review = None;
-                                        cx.notify();
-                                    }),
-                                ))
-                                .child(ui::button(
-                                    "review-send",
-                                    if form.sending {
-                                        "Enviando…"
-                                    } else {
-                                        "Enviar a Slack"
-                                    },
-                                    !form.sending,
-                                    cx.listener(|this, _event, _window, cx| this.send_review(cx)),
-                                )),
-                        ),
-                ),
-        )
     }
 
     fn subgroups(&self, id: i64) -> Vec<folders::Folder> {
@@ -1304,7 +995,7 @@ impl Root {
             let action = status::action(pull, stack::below(pull, self.mine.pulls()), now);
             if let Some(task) = action.task.filter(|_| mine) {
                 let asked = url.to_string();
-                items.push(menu_item(
+                items.push(ui::menu_item(
                     "menu-ask",
                     if self.opening_agent.is_some() {
                         "Pidiendo al agente…".to_string()
@@ -1317,14 +1008,14 @@ impl Root {
             let wants_review = mine && !pull.draft && pull.review != Review::Approved;
             if wants_review && review::config().is_some() {
                 let asked = url.to_string();
-                items.push(menu_item(
+                items.push(ui::menu_item(
                     "menu-review",
                     "Pedir review en Slack…",
                     cx.listener(move |this, _event, _window, cx| this.open_review(&asked, cx)),
                 ));
             } else if let Some(channel) = slack_channel().filter(|_| wants_review) {
                 let copied = url.to_string();
-                items.push(menu_item(
+                items.push(ui::menu_item(
                     "menu-slack",
                     "Pedir review en Slack",
                     move |_event, _window, cx| {
@@ -1346,7 +1037,7 @@ impl Root {
                     _ => "Comentar /deploy",
                 };
                 let target = url.to_string();
-                items.push(menu_item(
+                items.push(ui::menu_item(
                     "menu-deploy",
                     label,
                     cx.listener(move |this, _event, _window, cx| {
@@ -1361,7 +1052,7 @@ impl Root {
             }
             for (index, check) in pull.failing_checks.iter().enumerate() {
                 if let Some(logs) = check.url.clone() {
-                    items.push(menu_item(
+                    items.push(ui::menu_item(
                         SharedString::from(format!("menu-logs-{index}")),
                         format!("Ver logs de {}", check.name),
                         move |_event, _window, cx| cx.open_url(&logs),
@@ -1371,7 +1062,7 @@ impl Root {
         }
 
         let copied = url.to_string();
-        items.push(menu_item(
+        items.push(ui::menu_item(
             "menu-copy-url",
             "Copiar URL del PR",
             move |_event, _window, cx| {
@@ -1380,7 +1071,7 @@ impl Root {
         ));
         if self.folders.by_url.contains_key(url) {
             let url = url.to_string();
-            items.push(menu_item(
+            items.push(ui::menu_item(
                 "menu-ungroup",
                 "Sacar del grupo",
                 cx.listener(move |this, _event, _window, cx| this.move_to(&url, None, cx)),
@@ -1394,14 +1085,13 @@ impl Root {
     fn menu(&self, menu: &Menu, cx: &mut Context<Self>) -> impl IntoElement {
         let items: Vec<_> = match &menu.target {
             MenuFor::Pull(url) => self.pull_menu(url, cx),
-            MenuFor::Pick(field) => self.pick_menu(*field, cx),
             MenuFor::Folder(id) => {
                 let id = *id;
                 let subgroup = self
                     .folders
                     .get(id)
                     .is_some_and(|folder| folder.parent.is_some());
-                let mut items = vec![menu_item(
+                let mut items = vec![ui::menu_item(
                     "menu-agent",
                     if subgroup {
                         "Abrir agente del grupo"
@@ -1411,7 +1101,7 @@ impl Root {
                     cx.listener(move |this, _event, _window, cx| this.open_agent(id, cx)),
                 )];
                 if !subgroup {
-                    items.push(menu_item(
+                    items.push(ui::menu_item(
                         "menu-subgroup",
                         "Nuevo subgrupo",
                         cx.listener(move |this, _event, _window, cx| {
@@ -1425,14 +1115,14 @@ impl Root {
                         }),
                     ));
                 }
-                items.push(menu_item(
+                items.push(ui::menu_item(
                     "menu-rename",
                     "Renombrar",
                     cx.listener(move |this, _event, _window, cx| {
                         this.start_editing(Editing::Rename(id), cx)
                     }),
                 ));
-                items.push(menu_item(
+                items.push(ui::menu_item(
                     "menu-delete",
                     match (subgroup, self.folders.children(id).next().is_some()) {
                         (true, _) => "Eliminar subgrupo",
@@ -2593,23 +2283,6 @@ fn drop_highlight(style: gpui::StyleRefinement) -> gpui::StyleRefinement {
         .border_color(rgb(theme::ACCENT))
 }
 
-fn menu_item(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::AnyElement {
-    div()
-        .id(id)
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
-        .child(label.into())
-        .on_click(on_click)
-        .into_any_element()
-}
-
 /// Builds the chip a dragged PR row shows under the cursor.
 fn drag_preview(
     dragged: &Dragged,
@@ -2804,6 +2477,13 @@ fn steps(pull: &PullRequest, run: &Pipeline) -> impl IntoElement {
         )))
 }
 
+impl review_view::Requester for Root {
+    fn review_asked(&mut self, url: &str, cx: &mut Context<Self>) {
+        self.review_asked.insert(url.to_string(), Instant::now());
+        cx.notify();
+    }
+}
+
 impl Focusable for Root {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -2818,13 +2498,7 @@ impl Render for Root {
             .on_action(cx.listener(|this, action, _window, cx| this.refresh(action, cx)))
             .on_action(cx.listener(|this, _: &ShowMine, _window, cx| this.show(Tab::Mine, cx)))
             .on_action(cx.listener(|this, _: &ShowMerged, _window, cx| this.show(Tab::Merged, cx)))
-            .on_key_down(cx.listener(|this, event, _window, cx| {
-                if this.review.is_some() {
-                    this.form_key(event, cx)
-                } else {
-                    this.edit_key(event, cx)
-                }
-            }))
+            .on_key_down(cx.listener(|this, event, _window, cx| this.edit_key(event, cx)))
             .flex()
             .flex_col()
             .gap_3()
@@ -2860,9 +2534,6 @@ impl Render for Root {
                             .child(self.body(cx)),
                     ),
             )
-            .when_some(self.review.as_ref(), |this, form| {
-                this.child(self.review_form(form, cx))
-            })
             .when_some(self.menu.as_ref(), |this, menu| this.child(self.menu(menu, cx)))
             .child(div().text_xs().text_color(rgb(theme::MUTED)).child(
                 "clic en el título abre el PR · ⋯ o clic derecho: acciones · arrástralo a un grupo · cmd-r actualiza · cmd-1/2 pestañas",
