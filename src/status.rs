@@ -84,8 +84,9 @@ pub struct Action {
 }
 
 /// The next action on the PR, by what blocks it first: a failed deploy,
-/// conflicts, red CI, requested changes; then what it waits on; then merging.
-pub fn action(pull: &PullRequest, now: i64) -> Action {
+/// conflicts, red CI, requested changes; then what it waits on, starting with
+/// the PR it is stacked on (`below`); then merging.
+pub fn action(pull: &PullRequest, below: Option<&PullRequest>, now: i64) -> Action {
     let act = |label: String, color: u32, task: Option<String>| Action { label, color, task };
     let names = |logins: &[String]| {
         logins
@@ -116,6 +117,12 @@ pub fn action(pull: &PullRequest, now: i64) -> Action {
                 theme::MUTED,
                 Some(label),
             )
+        } else if let Some(below) = below {
+            act(
+                format!("Esperando el merge de #{} (borrador)", below.number),
+                theme::MUTED,
+                None,
+            )
         } else {
             act("Sacar de borrador".to_string(), theme::MUTED, None)
         };
@@ -141,6 +148,13 @@ pub fn action(pull: &PullRequest, now: i64) -> Action {
     if pull.review == Review::ChangesRequested {
         let label = "Atender los cambios pedidos en la review".to_string();
         return act(label.clone(), theme::RED, Some(label));
+    }
+    if let Some(below) = below {
+        return act(
+            format!("Esperando el merge de #{}", below.number),
+            theme::YELLOW,
+            None,
+        );
     }
     if pull.checks == Checks::Pending {
         return act("Esperando CI".to_string(), theme::YELLOW, None);
@@ -427,10 +441,11 @@ mod tests {
             ..pull()
         };
 
-        let conflicts = action(&red, 0);
-        let asked = action(&waiting, 0);
-        let to_publish = action(&draft, 0);
-        let ready = action(&pull(), 0);
+        let conflicts = action(&red, None, 0);
+        let asked = action(&waiting, None, 0);
+        let to_publish = action(&draft, None, 0);
+        let ready = action(&pull(), None, 0);
+        let stacked = action(&pull(), Some(&waiting), 0);
 
         assert_eq!(conflicts.label, "Resolver conflictos con master");
         assert_eq!(
@@ -443,11 +458,13 @@ mod tests {
                     mergeable: Mergeable::Clean,
                     ..red
                 },
+                None,
                 0
             )
             .label,
             "Arreglar CI: pytest, docs-check"
         );
+        assert_eq!(stacked.label, "Esperando el merge de #1");
         assert_eq!(asked.label, "Esperando review de @carla");
         assert_eq!(asked.task, None);
         assert_eq!(to_publish.label, "Sacar de borrador");

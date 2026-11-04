@@ -18,6 +18,7 @@ mod merged;
 mod notify;
 mod orca;
 mod pipeline;
+mod stack;
 mod status;
 mod theme;
 mod tool;
@@ -502,7 +503,8 @@ impl Root {
         else {
             return;
         };
-        let Some(task) = status::action(&pull, now()).task else {
+        let below = stack::below(&pull, self.mine.pulls());
+        let Some(task) = status::action(&pull, below, now()).task else {
             return;
         };
         let folder = self
@@ -886,7 +888,8 @@ impl Root {
             .as_ref()
             .is_some_and(|run| run.state(now()) == State::Running);
         let deploy = self.deploys.get(&pull.url);
-        let task = status::action(pull, now()).task.filter(|_| mine);
+        let below = stack::below(pull, self.mine.pulls());
+        let task = status::action(pull, below, now()).task.filter(|_| mine);
         let asking = self.opening_agent.is_some();
         let deploy_label = match deploy {
             Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR => "¿Enviar /deploy?",
@@ -1770,7 +1773,7 @@ impl Root {
                                 MouseButton::Right,
                                 self.open_menu(MenuFor::Pull(pull.url.clone()), cx),
                             )
-                            .child(card_summary(pull)),
+                            .child(card_summary(pull, self.mine.pulls())),
                     )
                     .when(!pull.failing_checks.is_empty(), |this| {
                         this.child(failures(pull))
@@ -1971,7 +1974,7 @@ impl Root {
                                         MouseButton::Right,
                                         self.open_menu(MenuFor::Pull(pull.url.clone()), cx),
                                     )
-                                    .child(summary(pull)),
+                                    .child(summary(pull, self.mine.pulls())),
                             )
                             .child(self.actions(pull, cx)),
                     )
@@ -2204,7 +2207,7 @@ fn section(title: &str, color: u32, rows: Vec<gpui::AnyElement>) -> impl IntoEle
 }
 
 /// Repo, branches, title and badges. Clicking it opens the PR on GitHub.
-fn summary(pull: &PullRequest) -> impl IntoElement {
+fn summary(pull: &PullRequest, pulls: &[PullRequest]) -> impl IntoElement {
     let url = pull.url.clone();
     let context = format!(
         "{} #{} · {} ← {}",
@@ -2245,7 +2248,8 @@ fn summary(pull: &PullRequest) -> impl IntoElement {
                 .truncate()
                 .child(pull.title.clone()),
         )
-        .child(action_line(pull))
+        .child(action_line(pull, pulls))
+        .children(relations(pull, pulls))
         .child(
             div()
                 .flex()
@@ -2265,7 +2269,7 @@ fn summary(pull: &PullRequest) -> impl IntoElement {
 
 /// A board card's top: repo, number and age, the title in up to two lines,
 /// and the badges. Clicking it opens the PR on GitHub.
-fn card_summary(pull: &PullRequest) -> impl IntoElement {
+fn card_summary(pull: &PullRequest, pulls: &[PullRequest]) -> impl IntoElement {
     let url = pull.url.clone();
 
     div()
@@ -2303,7 +2307,8 @@ fn card_summary(pull: &PullRequest) -> impl IntoElement {
                 .line_clamp(2)
                 .child(pull.title.clone()),
         )
-        .child(action_line(pull))
+        .child(action_line(pull, pulls))
+        .children(relations(pull, pulls))
         .child(
             div()
                 .flex()
@@ -2322,8 +2327,8 @@ fn card_summary(pull: &PullRequest) -> impl IntoElement {
 }
 
 /// The PR's next action, in its color, so the eye finds the verb first.
-fn action_line(pull: &PullRequest) -> impl IntoElement {
-    let action = status::action(pull, now());
+fn action_line(pull: &PullRequest, pulls: &[PullRequest]) -> impl IntoElement {
+    let action = status::action(pull, stack::below(pull, pulls), now());
     div()
         .flex()
         .gap_1()
@@ -2331,6 +2336,39 @@ fn action_line(pull: &PullRequest) -> impl IntoElement {
         .text_color(rgb(action.color))
         .child("→")
         .child(div().flex_1().min_w(px(0.)).truncate().child(action.label))
+}
+
+/// The stack the PR is in and its [MASTER]/[DEV] twin, when it has them.
+fn relations(pull: &PullRequest, pulls: &[PullRequest]) -> Vec<gpui::AnyElement> {
+    let line = |text: String| {
+        div()
+            .text_xs()
+            .text_color(rgb(theme::MUTED))
+            .truncate()
+            .child(text)
+            .into_any_element()
+    };
+    let mut lines = Vec::new();
+    if let Some(chain) = stack::chain_label(pull, pulls) {
+        lines.push(line(format!("Stack: {chain}")));
+    }
+    if let Some(twin) = stack::twin(pull, pulls) {
+        let prefix = stack::split_prefix(&twin.title).map_or("", |(prefix, _)| prefix);
+        let state: Vec<_> = status::badges(twin)
+            .into_iter()
+            .map(|badge| badge.label)
+            .collect();
+        lines.push(line(format!(
+            "Gemela {prefix} #{} · {}",
+            twin.number,
+            if state.is_empty() {
+                "sin checks".to_string()
+            } else {
+                state.join(" · ")
+            }
+        )));
+    }
+    lines
 }
 
 /// Every failed check with why it failed; clicking one opens its logs.

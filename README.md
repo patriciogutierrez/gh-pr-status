@@ -153,6 +153,13 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   el agente del grupo del PR y le escribe la tarea con el PR, la rama, los checks fallidos y
   sus logs, y cómo ubicar o crear el worktree. El PR tiene que estar en un grupo; si el agente
   recién abrió y pregunta si confías en la carpeta, hay que responderle en Orca y pedir de nuevo.
+- **Stacks**: si la base de un PR es la rama de otro PR tuyo abierto, la fila muestra la
+  cadena completa (`master ← #7684 ← [#7685]`) y la siguiente acción pasa a «Esperando el
+  merge de #7684»; solo el de abajo dice «Mergear». Cuando GitHub re-apunta un PR a otra base
+  (al mergearse el de abajo), llega una notificación: es el momento de sacarlo de borrador.
+- **Gemelas [MASTER]/[DEV]**: un PR con el mismo título bajo el otro prefijo, en el mismo
+  repo, aparece en la fila como «Gemela [DEV] #N» con su CI y review. Solo entre PRs abiertos:
+  una gemela cerrada sin mergear no se ve.
 - Cada fila muestra repo, número, rama base y rama head, la última actualización, y
   badges de CI, review y conflictos. El de review dice quién aprobó o a quién se le pidió
   review. Si el CI falla, lista cada check fallido con el motivo (la primera anotación de
@@ -263,6 +270,7 @@ cargo clippy --all-targets
 | `src/merged.rs` | Los PRs mergeados: la búsqueda en GitHub, el registro en SQLite y los días en hora local |
 | `src/notify.rs` | Detecta hitos de deploy y PRs aprobados, y manda la notificación de macOS |
 | `src/tool.rs` | Encuentra `gh` y los notificadores aunque la app no herede el `PATH` del shell |
+| `src/stack.rs` | Stacks de PRs (base sobre la rama de otro) y gemelas [MASTER]/[DEV] |
 | `src/status.rs` | En qué grupo cae un PR, sus badges y el "hace N min" |
 | `src/ui.rs` | Botones, pestañas y badges compartidos |
 | `src/theme.rs` | Colores (Catppuccin Mocha) |
