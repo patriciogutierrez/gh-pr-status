@@ -154,6 +154,19 @@ fn task_prompt(pull: &PullRequest, task: &str, folder: &Folder, code: &str) -> S
         "{task} en el PR #{} de {} ({}), rama `{}` sobre `{}`.",
         pull.number, pull.repo, pull.url, pull.head, pull.base
     );
+    for (index, thread) in pull.threads.iter().enumerate() {
+        let at = match thread.line {
+            Some(line) => format!("{}:{line}", thread.path),
+            None => thread.path.clone(),
+        };
+        prompt.push_str(&format!(
+            " Hilo de review {} (@{} en {at}): {} ({}).",
+            index + 1,
+            thread.author,
+            thread.body,
+            thread.url
+        ));
+    }
     for check in &pull.failing_checks {
         prompt.push_str(&format!(" Check fallido `{}`", check.name));
         if let Some(reason) = &check.reason {
@@ -525,6 +538,7 @@ mod tests {
             requested_reviewers: Vec::new(),
             mergeable: Mergeable::Clean,
             comments: 0,
+            threads: Vec::new(),
             updated_at: 0,
             pipeline: None,
         }
