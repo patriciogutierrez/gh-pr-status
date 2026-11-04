@@ -1613,6 +1613,13 @@ impl Root {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_x_scroll()
+                    // Only sideways deltas move the board; a vertical wheel
+                    // is for the column under the mouse, which would
+                    // otherwise scroll both. GPUI 0.2 has no setter for this.
+                    .map(|mut board| {
+                        board.style().restrict_scroll_to_axis = Some(true);
+                        board
+                    })
                     .children(columns),
             )
     }
