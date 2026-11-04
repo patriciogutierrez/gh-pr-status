@@ -490,6 +490,56 @@ impl Root {
         .detach();
     }
 
+    /// Hands the PR's next action to its group's agent. A PR in no group has
+    /// no agent to ask.
+    fn ask_agent(&mut self, url: &str, cx: &mut Context<Self>) {
+        let Some(pull) = self
+            .mine
+            .pulls()
+            .iter()
+            .find(|pull| pull.url == url)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(task) = status::action(&pull, now()).task else {
+            return;
+        };
+        let folder = self
+            .folders
+            .by_url
+            .get(url)
+            .and_then(|id| self.folders.root(*id))
+            .cloned();
+        let Some(folder) = folder else {
+            self.folders_error =
+                Some("Pon el PR en un grupo para pedírselo al agente del grupo.".to_string());
+            cx.notify();
+            return;
+        };
+        if self.opening_agent.is_some() {
+            return;
+        }
+        let subgroups = self.subgroups(folder.id);
+        self.opening_agent = Some(folder.id);
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { orca::ask_agent(&folder, &subgroups, &pull, &task) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.opening_agent = None;
+                this.folders_error = result.err();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn subgroups(&self, id: i64) -> Vec<folders::Folder> {
         self.folders.children(id).cloned().collect()
     }
@@ -836,17 +886,32 @@ impl Root {
             .as_ref()
             .is_some_and(|run| run.state(now()) == State::Running);
         let deploy = self.deploys.get(&pull.url);
-        let label = match deploy {
+        let task = status::action(pull, now()).task.filter(|_| mine);
+        let asking = self.opening_agent.is_some();
+        let deploy_label = match deploy {
             Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR => "¿Enviar /deploy?",
             Some(Deploy::Sending) => "Enviando…",
             _ => "/deploy",
         };
         let url = pull.url.clone();
+        let asked = pull.url.clone();
 
         div()
             .flex()
             .flex_shrink_0()
             .gap_1()
+            .when(task.is_some(), |this| {
+                this.child(ui::button(
+                    SharedString::from(format!("ask-{}", pull.url)),
+                    if asking {
+                        "Pidiendo…"
+                    } else {
+                        "Pedir al agente"
+                    },
+                    !asking,
+                    cx.listener(move |this, _event, _window, cx| this.ask_agent(&asked, cx)),
+                ))
+            })
             .when_some(slack, |this, channel| {
                 let pull_url = pull.url.clone();
                 this.child(ui::button(
@@ -862,7 +927,7 @@ impl Root {
             .when(mine && !pull.draft && !deploying, |this| {
                 this.child(ui::button(
                     SharedString::from(format!("deploy-{}", pull.url)),
-                    label,
+                    deploy_label,
                     !matches!(deploy, Some(Deploy::Sending)),
                     cx.listener(move |this, _event, _window, cx| this.deploy(&url, cx)),
                 ))
@@ -2180,6 +2245,7 @@ fn summary(pull: &PullRequest) -> impl IntoElement {
                 .truncate()
                 .child(pull.title.clone()),
         )
+        .child(action_line(pull))
         .child(
             div()
                 .flex()
@@ -2237,6 +2303,7 @@ fn card_summary(pull: &PullRequest) -> impl IntoElement {
                 .line_clamp(2)
                 .child(pull.title.clone()),
         )
+        .child(action_line(pull))
         .child(
             div()
                 .flex()
@@ -2252,6 +2319,18 @@ fn card_summary(pull: &PullRequest) -> impl IntoElement {
                     this.child(ui::badge(format!("💬 {}", pull.comments), theme::SUBTEXT))
                 }),
         )
+}
+
+/// The PR's next action, in its color, so the eye finds the verb first.
+fn action_line(pull: &PullRequest) -> impl IntoElement {
+    let action = status::action(pull, now());
+    div()
+        .flex()
+        .gap_1()
+        .text_xs()
+        .text_color(rgb(action.color))
+        .child("→")
+        .child(div().flex_1().min_w(px(0.)).truncate().child(action.label))
 }
 
 /// Every failed check with why it failed; clicking one opens its logs.

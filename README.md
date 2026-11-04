@@ -147,6 +147,12 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   `GH_PR_STATUS_CODE_DIR` si está definida. La primera vez, Claude Code pregunta si confías
   en la carpeta del grupo. Al eliminar un grupo, su carpeta queda en disco y registrada en
   Orca; sácala desde Orca.
+- Cada fila lleva en color su **siguiente acción**: lo primero que la traba (deploy fallido,
+  conflictos, CI roja, cambios pedidos), si no lo que espera (CI, review de alguien, GitHub) y
+  si no «Mergear». Cuando es algo que un agente puede hacer, el botón **Pedir al agente** abre
+  el agente del grupo del PR y le escribe la tarea con el PR, la rama, los checks fallidos y
+  sus logs, y cómo ubicar o crear el worktree. El PR tiene que estar en un grupo; si el agente
+  recién abrió y pregunta si confías en la carpeta, hay que responderle en Orca y pedir de nuevo.
 - Cada fila muestra repo, número, rama base y rama head, la última actualización, y
   badges de CI, review y conflictos. El de review dice quién aprobó o a quién se le pidió
   review. Si el CI falla, lista cada check fallido con el motivo (la primera anotación de

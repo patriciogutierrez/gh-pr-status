@@ -12,6 +12,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -49,6 +50,136 @@ pub struct Worktree {
 /// first time it makes the group's folder and registers it in Orca. `folder` is
 /// a top-level group and `subgroups` its subgroups.
 pub fn open_agent(folder: &Folder, subgroups: &[Folder]) -> Result<(), String> {
+    agent_terminal(folder, subgroups)?;
+    focus_orca()
+}
+
+/// Opens the group's agent and hands it `task` on `pull`: waits for the
+/// session to be idle, then types the request and submits it. A session still
+/// asking whether to trust its folder gets nothing, since typing there would
+/// answer the question.
+pub fn ask_agent(
+    folder: &Folder,
+    subgroups: &[Folder],
+    pull: &PullRequest,
+    task: &str,
+) -> Result<(), String> {
+    let handle = agent_terminal(folder, subgroups)?;
+    match wait_for_prompt(&handle)? {
+        Screen::Prompt => {}
+        Screen::Trust => {
+            focus_orca()?;
+            return Err(
+                "El agente espera que confirmes la carpeta del grupo en Orca; después vuelve a pedirle."
+                    .to_string(),
+            );
+        }
+        Screen::Other => {
+            focus_orca()?;
+            return Err(
+                "El agente no mostró su prompt; pídele de nuevo cuando esté listo.".to_string(),
+            );
+        }
+    }
+    orca(&[
+        "terminal",
+        "send",
+        "--terminal",
+        &handle,
+        "--text",
+        &task_prompt(pull, task, folder, &code_dir()?),
+        "--enter",
+        "--wait-submit",
+        "5",
+    ])?;
+    focus_orca()
+}
+
+/// What the agent's terminal shows.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Screen {
+    /// Claude Code's input line, ready for a request.
+    Prompt,
+    /// Claude Code asking whether to trust the folder.
+    Trust,
+    Other,
+}
+
+/// How long a fresh session gets to draw its prompt.
+const PROMPT_WAIT: Duration = Duration::from_secs(30);
+const PROMPT_POLL: Duration = Duration::from_millis(500);
+
+/// Polls the terminal's screen until Claude Code shows its prompt or its trust
+/// question. Orca's own idle wait returns while the shell is still launching
+/// `claude`, which is too early: typing then lands in the trust question.
+fn wait_for_prompt(handle: &str) -> Result<Screen, String> {
+    let started = Instant::now();
+    loop {
+        let screen = read_screen(handle)?;
+        if screen != Screen::Other || started.elapsed() >= PROMPT_WAIT {
+            return Ok(screen);
+        }
+        std::thread::sleep(PROMPT_POLL);
+    }
+}
+
+fn read_screen(handle: &str) -> Result<Screen, String> {
+    let result = orca(&["terminal", "read", "--terminal", handle, "--screen"])?;
+    let lines = result["terminal"]["tail"].as_array();
+    Ok(screen_of(
+        lines.into_iter().flatten().filter_map(Value::as_str),
+    ))
+}
+
+fn screen_of<'a>(lines: impl Iterator<Item = &'a str>) -> Screen {
+    let mut prompt = false;
+    for line in lines {
+        if line.contains("safety check") {
+            return Screen::Trust;
+        }
+        if line.trim_start().starts_with('❯') {
+            prompt = true;
+        }
+    }
+    if prompt {
+        Screen::Prompt
+    } else {
+        Screen::Other
+    }
+}
+
+/// What the agent is asked when a PR's next action is handed to it.
+fn task_prompt(pull: &PullRequest, task: &str, folder: &Folder, code: &str) -> String {
+    let mut prompt = format!(
+        "{task} en el PR #{} de {} ({}), rama `{}` sobre `{}`.",
+        pull.number, pull.repo, pull.url, pull.head, pull.base
+    );
+    for check in &pull.failing_checks {
+        prompt.push_str(&format!(" Check fallido `{}`", check.name));
+        if let Some(reason) = &check.reason {
+            prompt.push_str(&format!(": {reason}"));
+        }
+        if let Some(url) = &check.url {
+            prompt.push_str(&format!(" (logs: {url})"));
+        }
+        prompt.push('.');
+    }
+    prompt.push_str(&format!(
+        " Trabaja en el worktree de Orca que tenga esa rama (`orca worktree list --json`). Si no hay \
+ninguno, créalo con `orca worktree create --repo path:{code}/{} --name {} --comment \"{TAG}{}\" \
+--setup skip --json` y cámbialo a la rama con `git fetch origin {} && git checkout {}`. Al terminar, \
+haz push y avísame.",
+        pull.repo_name(),
+        pull.head.rsplit('/').next().unwrap_or(&pull.head),
+        folder.id,
+        pull.head,
+        pull.head
+    ));
+    prompt
+}
+
+/// The handle of the group's agent terminal, opened if it isn't yet.
+fn agent_terminal(folder: &Folder, subgroups: &[Folder]) -> Result<String, String> {
     let dir = agent_dir(folder)?;
     write_subgroups_file(&dir, folder, subgroups)?;
     let path = dir.to_string_lossy().to_string();
@@ -61,23 +192,34 @@ pub fn open_agent(folder: &Folder, subgroups: &[Folder]) -> Result<(), String> {
         .into_iter()
         .flatten()
         .find(|terminal| terminal["connected"].as_bool() == Some(true))
-        .and_then(|terminal| terminal["handle"].as_str());
+        .and_then(|terminal| terminal["handle"].as_str().map(str::to_string));
     match live {
-        Some(handle) => orca(&["terminal", "switch", "--terminal", handle])?,
-        None => orca(&[
-            "terminal",
-            "create",
-            "--worktree",
-            &selector,
-            "--title",
-            &folder.name,
-            "--command",
-            &format!("claude --add-dir {}", quote(&code_dir()?)),
-            "--focus",
-        ])?,
-    };
+        Some(handle) => {
+            orca(&["terminal", "switch", "--terminal", &handle])?;
+            Ok(handle)
+        }
+        None => {
+            let created = orca(&[
+                "terminal",
+                "create",
+                "--worktree",
+                &selector,
+                "--title",
+                &folder.name,
+                "--command",
+                &format!("claude --add-dir {}", quote(&code_dir()?)),
+                "--focus",
+            ])?;
+            created["terminal"]["handle"]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "Orca no devolvió la terminal creada".to_string())
+        }
+    }
+}
 
-    // `--focus` picks the tab; this brings Orca itself to the front.
+/// `--focus` picks the tab; this brings Orca itself to the front.
+fn focus_orca() -> Result<(), String> {
     Command::new("open")
         .args(["-a", "Orca"])
         .status()
@@ -481,6 +623,44 @@ mod tests {
 
         assert_eq!(claude.matches("## Subgrupos").count(), 1);
         assert!(claude.starts_with("# Grupo: Activaciones"));
+    }
+
+    #[test]
+    fn the_task_prompt_names_the_pull_request_its_checks_and_the_worktree_tag() {
+        let mut pull = pull("Toku-IA/databases", "feat/pagos");
+        pull.failing_checks = vec![crate::github::FailedCheck {
+            name: "pytest".to_string(),
+            reason: Some("3 failed".to_string()),
+            url: Some("https://ci/1".to_string()),
+        }];
+        let group = Folder {
+            id: 4,
+            name: "Pagos".to_string(),
+            parent: None,
+        };
+
+        let prompt = task_prompt(&pull, "Arreglar CI: pytest", &group, "/code");
+
+        assert!(prompt.starts_with("Arreglar CI: pytest en el PR #12 de Toku-IA/databases"));
+        assert!(prompt.contains("Check fallido `pytest`: 3 failed (logs: https://ci/1)."));
+        assert!(prompt.contains(
+            "--repo path:/code/databases --name pagos --comment \"gh-pr-status:group=4\""
+        ));
+        assert!(prompt.contains("git checkout feat/pagos"));
+    }
+
+    #[test]
+    fn the_trust_question_is_told_apart_from_the_prompt() {
+        let trust = [
+            "Quick safety check: Is this a project you trust?",
+            " ❯ No, exit",
+        ];
+        let ready = ["──────", "❯ ", "? for shortcuts"];
+        let shell = ["➜  grupo claude --add-dir '/code'"];
+
+        assert_eq!(screen_of(trust.into_iter()), Screen::Trust);
+        assert_eq!(screen_of(ready.into_iter()), Screen::Prompt);
+        assert_eq!(screen_of(shell.into_iter()), Screen::Other);
     }
 
     #[test]
