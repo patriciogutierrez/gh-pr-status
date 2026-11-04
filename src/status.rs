@@ -74,6 +74,96 @@ impl Group {
     }
 }
 
+/// What the PR waits for next: the one verb its row leads with, and the task
+/// for the group's agent when it is something an agent can do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Action {
+    pub label: String,
+    pub color: u32,
+    pub task: Option<String>,
+}
+
+/// The next action on the PR, by what blocks it first: a failed deploy,
+/// conflicts, red CI, requested changes; then what it waits on; then merging.
+pub fn action(pull: &PullRequest, now: i64) -> Action {
+    let act = |label: String, color: u32, task: Option<String>| Action { label, color, task };
+    let names = |logins: &[String]| {
+        logins
+            .iter()
+            .map(|login| format!("@{login}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let failing = || {
+        let checks: Vec<_> = pull
+            .failing_checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect();
+        if checks.is_empty() {
+            "Arreglar CI".to_string()
+        } else {
+            format!("Arreglar CI: {}", checks.join(", "))
+        }
+    };
+    let deploy = pull.pipeline.as_ref().map(|run| run.state(now));
+
+    if pull.draft {
+        return if pull.checks == Checks::Failing {
+            let label = failing();
+            act(
+                format!("{label} antes de sacarlo de borrador"),
+                theme::MUTED,
+                Some(label),
+            )
+        } else {
+            act("Sacar de borrador".to_string(), theme::MUTED, None)
+        };
+    }
+    if deploy == Some(pipeline::State::Failed) {
+        let step = pull
+            .pipeline
+            .as_ref()
+            .and_then(|run| run.headline())
+            .map(|step| format!(": {}", step.title))
+            .unwrap_or_default();
+        let label = format!("Revisar el deploy fallido{step}");
+        return act(label.clone(), theme::RED, Some(label));
+    }
+    if pull.mergeable == Mergeable::Conflicting {
+        let label = format!("Resolver conflictos con {}", pull.base);
+        return act(label.clone(), theme::RED, Some(label));
+    }
+    if pull.checks == Checks::Failing {
+        let label = failing();
+        return act(label.clone(), theme::RED, Some(label));
+    }
+    if pull.review == Review::ChangesRequested {
+        let label = "Atender los cambios pedidos en la review".to_string();
+        return act(label.clone(), theme::RED, Some(label));
+    }
+    if pull.checks == Checks::Pending {
+        return act("Esperando CI".to_string(), theme::YELLOW, None);
+    }
+    if deploy == Some(pipeline::State::Running) {
+        return act("Desplegando".to_string(), theme::YELLOW, None);
+    }
+    if pull.review != Review::Approved && !pull.requested_reviewers.is_empty() {
+        return act(
+            format!("Esperando review de {}", names(&pull.requested_reviewers)),
+            theme::YELLOW,
+            None,
+        );
+    }
+    if pull.review == Review::Required {
+        return act("Pedir review".to_string(), theme::YELLOW, None);
+    }
+    if pull.mergeable == Mergeable::Unknown {
+        return act("Esperando a GitHub".to_string(), theme::MUTED, None);
+    }
+    act("Mergear".to_string(), theme::GREEN, None)
+}
+
 /// A short status label and its color.
 pub struct Badge {
     pub label: String,
@@ -306,6 +396,62 @@ mod tests {
         );
         assert_eq!(label(&pending).as_deref(), Some("Esperando a @carla"));
         assert_eq!(label(&unasked), None);
+    }
+
+    #[test]
+    fn the_next_action_is_what_blocks_the_pull_request_first() {
+        let red = PullRequest {
+            checks: Checks::Failing,
+            failing_checks: vec![
+                crate::github::FailedCheck {
+                    name: "pytest".to_string(),
+                    reason: None,
+                    url: None,
+                },
+                crate::github::FailedCheck {
+                    name: "docs-check".to_string(),
+                    reason: None,
+                    url: None,
+                },
+            ],
+            mergeable: Mergeable::Conflicting,
+            ..pull()
+        };
+        let waiting = PullRequest {
+            review: Review::Required,
+            requested_reviewers: vec!["carla".to_string()],
+            ..pull()
+        };
+        let draft = PullRequest {
+            draft: true,
+            ..pull()
+        };
+
+        let conflicts = action(&red, 0);
+        let asked = action(&waiting, 0);
+        let to_publish = action(&draft, 0);
+        let ready = action(&pull(), 0);
+
+        assert_eq!(conflicts.label, "Resolver conflictos con master");
+        assert_eq!(
+            conflicts.task.as_deref(),
+            Some("Resolver conflictos con master")
+        );
+        assert_eq!(
+            action(
+                &PullRequest {
+                    mergeable: Mergeable::Clean,
+                    ..red
+                },
+                0
+            )
+            .label,
+            "Arreglar CI: pytest, docs-check"
+        );
+        assert_eq!(asked.label, "Esperando review de @carla");
+        assert_eq!(asked.task, None);
+        assert_eq!(to_publish.label, "Sacar de borrador");
+        assert_eq!(ready.label, "Mergear");
     }
 
     #[test]
