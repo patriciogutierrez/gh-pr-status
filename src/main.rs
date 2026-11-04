@@ -1015,18 +1015,14 @@ impl Root {
         let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) else {
             return;
         };
-        let message = format!(
-            "¿Comentar /deploy en {} #{}?",
-            pull.repo_name(),
-            pull.number
-        );
+        let message = format!("¿Hacer deploy de {} #{}?", pull.repo_name(), pull.number);
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
             &message,
             Some(&pull.title),
             // `Cancel` is what escape picks; a plain "Cancelar" would not be.
             &[
-                gpui::PromptButton::Other("/deploy".into()),
+                gpui::PromptButton::Other("Deploy".into()),
                 gpui::PromptButton::Cancel("Cancelar".into()),
             ],
             cx,
@@ -1102,8 +1098,8 @@ impl Root {
                 .is_some_and(|run| run.state(now) == State::Running);
             if mine && !pull.draft && !deploying {
                 let label = match self.deploys.get(url) {
-                    Some(Deploy::Sending) => "Enviando /deploy…",
-                    _ => "/deploy",
+                    Some(Deploy::Sending) => "Enviando deploy…",
+                    _ => "Deploy",
                 };
                 let target = url.to_string();
                 items.push(ui::menu_item(
@@ -2290,7 +2286,7 @@ impl Root {
                             .pl(px(16.))
                             .text_xs()
                             .text_color(rgb(theme::RED))
-                            .child(format!("No se pudo enviar /deploy: {error}")),
+                            .child(format!("No se pudo enviar el deploy: {error}")),
                     )
                 },
             )
