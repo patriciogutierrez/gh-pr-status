@@ -18,6 +18,8 @@ mod merged;
 mod notify;
 mod orca;
 mod pipeline;
+mod review;
+mod review_view;
 mod stack;
 mod status;
 mod theme;
@@ -30,10 +32,10 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnimationExt, App, Application, Bounds, ClipboardItem, Context, ElementId, FocusHandle,
-    Focusable, FontWeight, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point,
-    SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, anchored,
-    deferred, div, prelude::*, px, rgb, size,
+    AnimationExt, App, Application, Bounds, ClipboardItem, Context, FocusHandle, Focusable,
+    FontWeight, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, anchored, deferred, div,
+    prelude::*, px, rgb, size,
 };
 
 use github::{PullRequest, Review, Snapshot};
@@ -306,6 +308,8 @@ struct Root {
     merged_open: HashSet<i64>,
     /// PRs whose review threads are unfolded, by URL.
     threads_open: HashSet<String>,
+    /// When a review was last asked for through Slack, by PR URL.
+    review_asked: HashMap<String, Instant>,
     focus_handle: FocusHandle,
 }
 
@@ -328,6 +332,7 @@ impl Root {
             opening_agent: None,
             merged_open: HashSet::new(),
             threads_open: HashSet::new(),
+            review_asked: HashMap::new(),
             focus_handle: cx.focus_handle(),
         };
         root.start_clock(cx);
@@ -540,6 +545,20 @@ impl Root {
             .ok();
         })
         .detach();
+    }
+
+    /// Opens the review form for the PR in its own window.
+    fn open_review(&mut self, url: &str, cx: &mut Context<Self>) {
+        let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) else {
+            return;
+        };
+        let Some(config) = review::config() else {
+            return;
+        };
+        let (url, title) = (pull.url.clone(), pull.title.clone());
+        let root = cx.entity().downgrade();
+        self.folders_error = review_view::open(root, config, url, title, cx).err();
+        cx.notify();
     }
 
     fn subgroups(&self, id: i64) -> Vec<folders::Folder> {
@@ -976,7 +995,7 @@ impl Root {
             let action = status::action(pull, stack::below(pull, self.mine.pulls()), now);
             if let Some(task) = action.task.filter(|_| mine) {
                 let asked = url.to_string();
-                items.push(menu_item(
+                items.push(ui::menu_item(
                     "menu-ask",
                     if self.opening_agent.is_some() {
                         "Pidiendo al agente…".to_string()
@@ -986,11 +1005,22 @@ impl Root {
                     cx.listener(move |this, _event, _window, cx| this.ask_agent(&asked, cx)),
                 ));
             }
-            let slack =
-                slack_channel().filter(|_| mine && !pull.draft && pull.review != Review::Approved);
-            if let Some(channel) = slack {
+            // Once asked for, the review is on its way: the item goes until the
+            // app restarts.
+            let wants_review = mine
+                && !pull.draft
+                && pull.review != Review::Approved
+                && !self.review_asked.contains_key(url);
+            if wants_review && review::config().is_some() {
+                let asked = url.to_string();
+                items.push(ui::menu_item(
+                    "menu-review",
+                    "Pedir review en Slack…",
+                    cx.listener(move |this, _event, _window, cx| this.open_review(&asked, cx)),
+                ));
+            } else if let Some(channel) = slack_channel().filter(|_| wants_review) {
                 let copied = url.to_string();
-                items.push(menu_item(
+                items.push(ui::menu_item(
                     "menu-slack",
                     "Pedir review en Slack",
                     move |_event, _window, cx| {
@@ -1012,7 +1042,7 @@ impl Root {
                     _ => "Comentar /deploy",
                 };
                 let target = url.to_string();
-                items.push(menu_item(
+                items.push(ui::menu_item(
                     "menu-deploy",
                     label,
                     cx.listener(move |this, _event, _window, cx| {
@@ -1027,7 +1057,7 @@ impl Root {
             }
             for (index, check) in pull.failing_checks.iter().enumerate() {
                 if let Some(logs) = check.url.clone() {
-                    items.push(menu_item(
+                    items.push(ui::menu_item(
                         SharedString::from(format!("menu-logs-{index}")),
                         format!("Ver logs de {}", check.name),
                         move |_event, _window, cx| cx.open_url(&logs),
@@ -1037,7 +1067,7 @@ impl Root {
         }
 
         let copied = url.to_string();
-        items.push(menu_item(
+        items.push(ui::menu_item(
             "menu-copy-url",
             "Copiar URL del PR",
             move |_event, _window, cx| {
@@ -1046,7 +1076,7 @@ impl Root {
         ));
         if self.folders.by_url.contains_key(url) {
             let url = url.to_string();
-            items.push(menu_item(
+            items.push(ui::menu_item(
                 "menu-ungroup",
                 "Sacar del grupo",
                 cx.listener(move |this, _event, _window, cx| this.move_to(&url, None, cx)),
@@ -1066,7 +1096,7 @@ impl Root {
                     .folders
                     .get(id)
                     .is_some_and(|folder| folder.parent.is_some());
-                let mut items = vec![menu_item(
+                let mut items = vec![ui::menu_item(
                     "menu-agent",
                     if subgroup {
                         "Abrir agente del grupo"
@@ -1076,7 +1106,7 @@ impl Root {
                     cx.listener(move |this, _event, _window, cx| this.open_agent(id, cx)),
                 )];
                 if !subgroup {
-                    items.push(menu_item(
+                    items.push(ui::menu_item(
                         "menu-subgroup",
                         "Nuevo subgrupo",
                         cx.listener(move |this, _event, _window, cx| {
@@ -1090,14 +1120,14 @@ impl Root {
                         }),
                     ));
                 }
-                items.push(menu_item(
+                items.push(ui::menu_item(
                     "menu-rename",
                     "Renombrar",
                     cx.listener(move |this, _event, _window, cx| {
                         this.start_editing(Editing::Rename(id), cx)
                     }),
                 ));
-                items.push(menu_item(
+                items.push(ui::menu_item(
                     "menu-delete",
                     match (subgroup, self.folders.children(id).next().is_some()) {
                         (true, _) => "Eliminar subgrupo",
@@ -2085,13 +2115,11 @@ impl Root {
                             .flex_1()
                             .min_w(px(0.))
                             .when(compact, |this| this.w_full())
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .truncate()
-                                    .child(meta(pull, compact)),
-                            )
+                            .child(div().flex_1().min_w(px(0.)).truncate().child(meta(
+                                pull,
+                                compact,
+                                self.review_asked.get(&pull.url),
+                            )))
                             .child(
                                 div()
                                     .flex_shrink_0()
@@ -2260,23 +2288,6 @@ fn drop_highlight(style: gpui::StyleRefinement) -> gpui::StyleRefinement {
         .border_color(rgb(theme::ACCENT))
 }
 
-fn menu_item(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::AnyElement {
-    div()
-        .id(id)
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
-        .child(label.into())
-        .on_click(on_click)
-        .into_any_element()
-}
-
 /// Builds the chip a dragged PR row shows under the cursor.
 fn drag_preview(
     dragged: &Dragged,
@@ -2342,11 +2353,18 @@ fn section(title: &str, color: u32, rows: Vec<gpui::AnyElement>) -> impl IntoEle
 }
 
 /// The rest of a PR's state after its action, in one muted line: repo and
-/// number, CI, review, conflicts, draft, comments and, unless `compact`, the
+/// number, CI, review, conflicts, draft, when a review was asked for through
+/// Slack (`asked`) until it is approved, comments and, unless `compact`, the
 /// branches.
-fn meta(pull: &PullRequest, compact: bool) -> String {
+fn meta(pull: &PullRequest, compact: bool, asked: Option<&Instant>) -> String {
     let mut parts = vec![format!("{} #{}", pull.repo_name(), pull.number)];
     parts.extend(status::badges(pull).into_iter().map(|badge| badge.label));
+    if let Some(asked) = asked.filter(|_| pull.review != Review::Approved) {
+        parts.push(format!(
+            "review pedido {}",
+            status::ago(asked.elapsed().as_secs() as i64)
+        ));
+    }
     match pull.comments {
         0 => {}
         1 => parts.push("1 comentario".to_string()),
@@ -2462,6 +2480,13 @@ fn steps(pull: &PullRequest, run: &Pipeline) -> impl IntoElement {
             !comment.is_empty(),
             move |_event, _window, cx| cx.open_url(&comment),
         )))
+}
+
+impl review_view::Requester for Root {
+    fn review_asked(&mut self, url: &str, cx: &mut Context<Self>) {
+        self.review_asked.insert(url.to_string(), Instant::now());
+        cx.notify();
+    }
 }
 
 impl Focusable for Root {

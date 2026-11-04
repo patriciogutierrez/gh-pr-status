@@ -69,6 +69,24 @@ pub fn toggle_button(
         .on_click(on_click)
 }
 
+/// One line of a popup menu.
+pub fn menu_item(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::AnyElement {
+    div()
+        .id(id)
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+        .child(label.into())
+        .on_click(on_click)
+        .into_any_element()
+}
+
 /// The one colored label a PR gets: its next action, tinted with its color.
 pub fn pill(label: impl Into<SharedString>, color: u32) -> impl IntoElement {
     div()
