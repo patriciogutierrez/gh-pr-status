@@ -199,8 +199,8 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   `GH_PR_STATUS_SLACK_CHANNEL`, el menú vuelve a copiar el link y abrir el canal. El
   comentario se escribe sin campo nativo: los acentos con tecla muerta no se componen.
 - **/deploy** comenta `/deploy` en el PR, como tu usuario de `gh`, para iniciar el
-  pipeline. Pide un segundo clic de confirmación (dentro de 5 s; el menú se queda abierto) y
-  no aparece en borradores ni mientras hay un deploy en curso.
+  pipeline. Antes pregunta en el diálogo del sistema (enter confirma, escape cancela), y no
+  aparece en borradores ni mientras hay un deploy en curso.
 - Las listas se recargan solas cada minuto; mientras alguno de tus PRs está desplegando,
   "Mis PRs" se recarga cada 20 s.
 

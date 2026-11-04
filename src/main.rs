@@ -60,8 +60,6 @@ const TICK: Duration = Duration::from_secs(5);
 const RECENT_STEPS: usize = 8;
 /// The comment that starts the deploy pipeline on a PR.
 const DEPLOY_COMMAND: &str = "/deploy";
-/// How long the deploy button waits for the confirming second click.
-const CONFIRM_FOR: Duration = Duration::from_secs(5);
 /// The sidebar's width until the user drags its edge, and how far it goes.
 const SIDEBAR_WIDTH: f32 = 180.;
 const SIDEBAR_MIN: f32 = 140.;
@@ -114,8 +112,6 @@ fn slack_channel() -> Option<&'static str> {
 
 /// Where a PR's `/deploy` comment is. A PR missing from the map has none going.
 enum Deploy {
-    /// First click done; a second one before the deadline sends the comment.
-    Confirming(Instant),
     Sending,
     Failed(String),
 }
@@ -1013,21 +1009,40 @@ impl Root {
         .detach();
     }
 
-    /// The deploy button's click: the first one asks for confirmation, the
-    /// second one, within `CONFIRM_FOR`, comments `/deploy` on the PR and
-    /// reloads "Mis PRs" so the bot's run shows up.
-    fn deploy(&mut self, url: &str, cx: &mut Context<Self>) {
-        let confirmed = matches!(
-            self.deploys.get(url),
-            Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR
-        );
-        if !confirmed {
-            self.deploys
-                .insert(url.to_string(), Deploy::Confirming(Instant::now()));
-            cx.notify();
+    /// Asks, in the system's own dialog, before commenting `/deploy` on the
+    /// PR; enter confirms, escape cancels.
+    fn deploy(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) else {
             return;
-        }
+        };
+        let message = format!(
+            "¿Comentar /deploy en {} #{}?",
+            pull.repo_name(),
+            pull.number
+        );
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &message,
+            Some(&pull.title),
+            // `Cancel` is what escape picks; a plain "Cancelar" would not be.
+            &[
+                gpui::PromptButton::Other("/deploy".into()),
+                gpui::PromptButton::Cancel("Cancelar".into()),
+            ],
+            cx,
+        );
+        let url = url.to_string();
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(0) {
+                this.update(cx, |this, cx| this.send_deploy(&url, cx)).ok();
+            }
+        })
+        .detach();
+    }
 
+    /// Comments `/deploy` on the PR and reloads "Mis PRs" so the bot's run
+    /// shows up.
+    fn send_deploy(&mut self, url: &str, cx: &mut Context<Self>) {
         self.deploys.insert(url.to_string(), Deploy::Sending);
         cx.notify();
 
@@ -1057,7 +1072,7 @@ impl Root {
     }
 
     /// A PR's menu: hand its next action to the group's agent, ask for a
-    /// review on Slack, comment `/deploy` (two clicks: the first asks), open
+    /// review on Slack, comment `/deploy` (after asking), open
     /// each failed check's logs, copy its URL and take it out of its group.
     /// Slack and `/deploy` only on the user's own open PRs.
     fn pull_menu(&self, url: &str, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
@@ -1087,9 +1102,6 @@ impl Root {
                 .is_some_and(|run| run.state(now) == State::Running);
             if mine && !pull.draft && !deploying {
                 let label = match self.deploys.get(url) {
-                    Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR => {
-                        "¿Enviar /deploy? Clic de nuevo para confirmar"
-                    }
                     Some(Deploy::Sending) => "Enviando /deploy…",
                     _ => "/deploy",
                 };
@@ -1097,14 +1109,7 @@ impl Root {
                 items.push(ui::menu_item(
                     "menu-deploy",
                     label,
-                    cx.listener(move |this, _event, _window, cx| {
-                        this.deploy(&target, cx);
-                        // The first click only asks; keep the menu open for
-                        // the one that confirms.
-                        if matches!(this.deploys.get(&target), Some(Deploy::Confirming(_))) {
-                            cx.stop_propagation();
-                        }
-                    }),
+                    cx.listener(move |this, _event, window, cx| this.deploy(&target, window, cx)),
                 ));
             }
             // Once asked for, the review is on its way: the item goes until the
