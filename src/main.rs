@@ -1061,23 +1061,50 @@ impl Root {
     /// each failed check's logs, copy its URL and take it out of its group.
     /// Slack and `/deploy` only on the user's own open PRs.
     fn pull_menu(&self, url: &str, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let mut items = Vec::new();
         let now = now();
+        // The order is fixed: copy, the Slack thread, /deploy, then the rest.
+        let copied = url.to_string();
+        let mut items = vec![ui::menu_item(
+            "menu-copy-url",
+            "Copiar URL",
+            move |_event, _window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+            },
+        )];
+        if let Some(link) = self.request_link(url) {
+            items.push(ui::menu_item(
+                "menu-request",
+                "Ver pedido en Slack",
+                move |_event, _window, cx| cx.open_url(&link),
+            ));
+        }
+
         if let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) {
             let mine = pull.author == self.login().unwrap_or_default();
-            let action = status::action(pull, stack::below(pull, self.mine.pulls()), now);
-            // Review threads get answered by hand, never by the agent.
-            let task = action.task.filter(|_| mine && pull.threads.is_empty());
-            if let Some(task) = task {
-                let asked = url.to_string();
+            let deploying = pull
+                .pipeline
+                .as_ref()
+                .is_some_and(|run| run.state(now) == State::Running);
+            if mine && !pull.draft && !deploying {
+                let label = match self.deploys.get(url) {
+                    Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR => {
+                        "¿Enviar /deploy? Clic de nuevo para confirmar"
+                    }
+                    Some(Deploy::Sending) => "Enviando /deploy…",
+                    _ => "/deploy",
+                };
+                let target = url.to_string();
                 items.push(ui::menu_item(
-                    "menu-ask",
-                    if self.opening_agent.is_some() {
-                        "Pidiendo al agente…".to_string()
-                    } else {
-                        format!("Pedir al agente: {task}")
-                    },
-                    cx.listener(move |this, _event, _window, cx| this.ask_agent(&asked, cx)),
+                    "menu-deploy",
+                    label,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.deploy(&target, cx);
+                        // The first click only asks; keep the menu open for
+                        // the one that confirms.
+                        if matches!(this.deploys.get(&target), Some(Deploy::Confirming(_))) {
+                            cx.stop_propagation();
+                        }
+                    }),
                 ));
             }
             // Once asked for, the review is on its way: the item goes until the
@@ -1104,10 +1131,6 @@ impl Root {
                     },
                 ));
             }
-            let deploying = pull
-                .pipeline
-                .as_ref()
-                .is_some_and(|run| run.state(now) == State::Running);
             if mine && pull.draft {
                 let target = url.to_string();
                 items.push(ui::menu_item(
@@ -1116,26 +1139,19 @@ impl Root {
                     cx.listener(move |this, _event, _window, cx| this.mark_ready(&target, cx)),
                 ));
             }
-            if mine && !pull.draft && !deploying {
-                let label = match self.deploys.get(url) {
-                    Some(Deploy::Confirming(at)) if at.elapsed() < CONFIRM_FOR => {
-                        "¿Enviar /deploy? Clic de nuevo para confirmar"
-                    }
-                    Some(Deploy::Sending) => "Enviando /deploy…",
-                    _ => "/deploy",
-                };
-                let target = url.to_string();
+            let action = status::action(pull, stack::below(pull, self.mine.pulls()), now);
+            // Review threads get answered by hand, never by the agent.
+            let task = action.task.filter(|_| mine && pull.threads.is_empty());
+            if let Some(task) = task {
+                let asked = url.to_string();
                 items.push(ui::menu_item(
-                    "menu-deploy",
-                    label,
-                    cx.listener(move |this, _event, _window, cx| {
-                        this.deploy(&target, cx);
-                        // The first click only asks; keep the menu open for
-                        // the one that confirms.
-                        if matches!(this.deploys.get(&target), Some(Deploy::Confirming(_))) {
-                            cx.stop_propagation();
-                        }
-                    }),
+                    "menu-ask",
+                    if self.opening_agent.is_some() {
+                        "Pidiendo al agente…".to_string()
+                    } else {
+                        format!("Pedir al agente: {task}")
+                    },
+                    cx.listener(move |this, _event, _window, cx| this.ask_agent(&asked, cx)),
                 ));
             }
             // The docs check's logs never say more than its name does.
@@ -1154,21 +1170,6 @@ impl Root {
             }
         }
 
-        if let Some(link) = self.request_link(url) {
-            items.push(ui::menu_item(
-                "menu-request",
-                "Ver pedido en Slack",
-                move |_event, _window, cx| cx.open_url(&link),
-            ));
-        }
-        let copied = url.to_string();
-        items.push(ui::menu_item(
-            "menu-copy-url",
-            "Copiar URL",
-            move |_event, _window, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-            },
-        ));
         if self.folders.by_url.contains_key(url) {
             let url = url.to_string();
             items.push(ui::menu_item(

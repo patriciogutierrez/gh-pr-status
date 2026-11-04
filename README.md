@@ -178,9 +178,10 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   hora, todos los errores (servicio y causa) y un botón para abrir el comentario.
 - **Clic en el título** abre el PR en el navegador.
 - **El menú del PR**, con el «⋯» que aparece al pasar el mouse o con clic derecho, reúne sus
-  acciones: pedir al agente (salvo cuando lo que falta es responder hilos de review), solicitar
-  review, marcar un borrador listo para review (`gh pr ready`), `/deploy`, ver los logs de
-  cada check fallido (menos docs-check), copiar la URL y sacarlo del grupo.
+  acciones, en este orden: copiar la URL, ver el pedido en Slack, `/deploy`, solicitar review,
+  marcar un borrador listo para review (`gh pr ready`), pedir al agente (salvo cuando lo que
+  falta es responder hilos de review), ver los logs de cada check fallido (menos docs-check) y
+  sacarlo del grupo.
 - **Solicitar review** abre un formulario en una ventana aparte: reviewer (de la lista de
   `GH_PR_STATUS_REVIEWERS`), urgencia (highest, high, medium, low), canal, comentario, y el
   link del PR ya puesto. «Enviar a Slack» (o enter) hace un `POST` al webhook del workflow de
