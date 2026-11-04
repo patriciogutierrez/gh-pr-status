@@ -308,8 +308,9 @@ struct Root {
     merged_open: HashSet<i64>,
     /// PRs whose review threads are unfolded, by URL.
     threads_open: HashSet<String>,
-    /// When a review was last asked for through Slack, by PR URL.
-    review_asked: HashMap<String, Instant>,
+    /// When a review was last asked for through Slack, by PR URL, in seconds
+    /// since the epoch.
+    review_asked: HashMap<String, i64>,
     focus_handle: FocusHandle,
 }
 
@@ -338,7 +339,27 @@ impl Root {
         root.start_clock(cx);
         Self::load_folders(cx);
         Self::load_sidebar_width(cx);
+        Self::load_review_asked(cx);
         root
+    }
+
+    fn load_review_asked(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { review::asked() })
+                .await;
+
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(asked) => this.review_asked = asked,
+                    Err(error) => this.folders_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Wakes up every `TICK`, reloads whichever tab is due and repaints, so
@@ -2356,14 +2377,11 @@ fn section(title: &str, color: u32, rows: Vec<gpui::AnyElement>) -> impl IntoEle
 /// number, CI, review, conflicts, draft, when a review was asked for through
 /// Slack (`asked`) until it is approved, comments and, unless `compact`, the
 /// branches.
-fn meta(pull: &PullRequest, compact: bool, asked: Option<&Instant>) -> String {
+fn meta(pull: &PullRequest, compact: bool, asked: Option<&i64>) -> String {
     let mut parts = vec![format!("{} #{}", pull.repo_name(), pull.number)];
     parts.extend(status::badges(pull).into_iter().map(|badge| badge.label));
     if let Some(asked) = asked.filter(|_| pull.review != Review::Approved) {
-        parts.push(format!(
-            "review pedido {}",
-            status::ago(asked.elapsed().as_secs() as i64)
-        ));
+        parts.push(format!("review pedido {}", status::ago(now() - asked)));
     }
     match pull.comments {
         0 => {}
@@ -2484,7 +2502,10 @@ fn steps(pull: &PullRequest, run: &Pipeline) -> impl IntoElement {
 
 impl review_view::Requester for Root {
     fn review_asked(&mut self, url: &str, cx: &mut Context<Self>) {
-        self.review_asked.insert(url.to_string(), Instant::now());
+        let at = now();
+        self.review_asked.insert(url.to_string(), at);
+        let url = url.to_string();
+        self.save(cx, move || review::remember(&url, at));
         cx.notify();
     }
 }
