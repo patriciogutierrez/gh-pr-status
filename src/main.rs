@@ -77,6 +77,8 @@ const FOLD_WIDTH: f32 = 12. + 8.;
 const SUBGROUP_INDENT: f32 = FOLD_WIDTH + 6.;
 /// How wide each column of a group's board is.
 const BOARD_COLUMN: f32 = 300.;
+/// The board's scrollbar: its height and the room kept under the columns.
+const SCROLLBAR_HEIGHT: f32 = 6.;
 /// A hovered name that doesn't fit waits `MARQUEE_WAIT`, slides left at
 /// `MARQUEE_SPEED` pixels a second until its end shows, holds `MARQUEE_HOLD`,
 /// slides back in `MARQUEE_RETURN`, and starts over.
@@ -160,6 +162,25 @@ enum Editing {
 struct ResizeSidebar;
 
 impl Render for ResizeSidebar {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// What the board's scrollbar thumb carries while dragged; the board itself
+/// follows the cursor.
+struct ScrollThumb;
+
+impl Render for ScrollThumb {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// What the board carries while its empty space is dragged to pan it.
+struct PanBoard;
+
+impl Render for PanBoard {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         gpui::Empty
     }
@@ -306,6 +327,14 @@ struct Root {
     opening_agent: Option<i64>,
     /// PRs whose review threads are unfolded, by URL.
     threads_open: HashSet<String>,
+    /// Where the board is scrolled to, for its scrollbar.
+    board_scroll: gpui::ScrollHandle,
+    /// Whether the scrollbar's thumb is being dragged; hover doesn't count
+    /// during a drag, and the bar must not vanish under the cursor.
+    board_dragging: bool,
+    /// Where the mouse went down on the board and how far it was scrolled
+    /// then, so dragging the board's empty space pans it.
+    pan_from: Option<(f32, f32)>,
     /// When a review was last asked for through Slack, by PR URL, in seconds
     /// since the epoch.
     review_asked: HashMap<String, i64>,
@@ -330,6 +359,9 @@ impl Root {
             sidebar_width: SIDEBAR_WIDTH,
             opening_agent: None,
             threads_open: HashSet::new(),
+            board_scroll: gpui::ScrollHandle::new(),
+            board_dragging: false,
+            pan_from: None,
             review_asked: HashMap::new(),
             focus_handle: cx.focus_handle(),
         };
@@ -1746,15 +1778,126 @@ impl Root {
             )
             .child(
                 div()
-                    .id("board")
+                    .id("board-frame")
+                    .group("board")
                     .flex()
-                    .gap_3()
+                    .flex_col()
+                    .gap_1()
                     .flex_1()
                     .min_h(px(0.))
-                    .overflow_x_scroll()
-                    .map(own_axis_only)
-                    .children(columns),
+                    .on_drag_move(cx.listener(
+                        |this, event: &gpui::DragMoveEvent<ScrollThumb>, _window, cx| {
+                            this.scroll_board_to(event.event.position.x, event.bounds, cx)
+                        },
+                    ))
+                    .on_drag_move(cx.listener(
+                        |this, event: &gpui::DragMoveEvent<PanBoard>, _window, cx| {
+                            this.pan_board(event.event.position.x, cx)
+                        },
+                    ))
+                    .child(
+                        div()
+                            .id("board")
+                            .flex()
+                            .gap_3()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .overflow_x_scroll()
+                            .map(own_axis_only)
+                            .track_scroll(&self.board_scroll)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseDownEvent, _window, _cx| {
+                                    let scrolled = -f32::from(this.board_scroll.offset().x);
+                                    this.pan_from = Some((f32::from(event.position.x), scrolled));
+                                }),
+                            )
+                            .on_drag(PanBoard, |_, _, _, cx| cx.new(|_| PanBoard))
+                            .children(columns),
+                    )
+                    .child(self.board_scrollbar()),
             )
+    }
+
+    /// Scrolls the board so the thumb's middle sits under the cursor, from a
+    /// drag over `frame`, the board's frame.
+    fn scroll_board_to(&mut self, cursor: Pixels, frame: Bounds<Pixels>, cx: &mut Context<Self>) {
+        let viewport = f32::from(self.board_scroll.bounds().size.width);
+        let content = viewport + f32::from(self.board_scroll.max_offset().width);
+        let track = f32::from(frame.size.width);
+        if content <= viewport || track <= 0. {
+            return;
+        }
+        let along = (f32::from(cursor - frame.left()) / track).clamp(0., 1.);
+        let offset = (along * content - viewport / 2.).clamp(0., content - viewport);
+        self.board_scroll
+            .set_offset(Point::new(px(-offset), px(0.)));
+        self.board_dragging = true;
+        cx.notify();
+    }
+
+    fn stop_dragging(&mut self, cx: &mut Context<Self>) {
+        self.pan_from = None;
+        if self.board_dragging {
+            self.board_dragging = false;
+            cx.notify();
+        }
+    }
+
+    /// Pans the board along with a drag of its empty space: the content
+    /// follows the cursor from where the mouse went down.
+    fn pan_board(&mut self, cursor: Pixels, cx: &mut Context<Self>) {
+        let Some((from_x, from_offset)) = self.pan_from else {
+            return;
+        };
+        let viewport = f32::from(self.board_scroll.bounds().size.width);
+        let content = viewport + f32::from(self.board_scroll.max_offset().width);
+        let offset =
+            (from_offset + from_x - f32::from(cursor)).clamp(0., (content - viewport).max(0.));
+        self.board_scroll
+            .set_offset(Point::new(px(-offset), px(0.)));
+        self.board_dragging = true;
+        cx.notify();
+    }
+
+    /// A thin horizontal scrollbar under the columns, shown while the mouse
+    /// is over the board and only when the columns don't fit. Dragging the
+    /// thumb scrolls.
+    fn board_scrollbar(&self) -> impl IntoElement {
+        let viewport = f32::from(self.board_scroll.bounds().size.width);
+        let content = viewport + f32::from(self.board_scroll.max_offset().width);
+        let scrolled = (-f32::from(self.board_scroll.offset().x)).max(0.);
+        let needed = content > viewport + 1.;
+        let (thumb, left) = if needed {
+            (viewport / content, scrolled / content)
+        } else {
+            (1., 0.)
+        };
+
+        div()
+            .relative()
+            .h(px(SCROLLBAR_HEIGHT))
+            .flex_shrink_0()
+            .rounded_full()
+            .when(needed, |this| {
+                this.opacity(if self.board_dragging { 1. } else { 0. })
+                    .group_hover("board", |style| style.opacity(1.))
+                    .bg(rgb(theme::MANTLE))
+                    .child(
+                        div()
+                            .id("board-thumb")
+                            .absolute()
+                            .top_0()
+                            .h_full()
+                            .left(gpui::relative(left))
+                            .w(gpui::relative(thumb))
+                            .rounded_full()
+                            .bg(rgb(theme::SURFACE_ACTIVE))
+                            .hover(|style| style.bg(rgb(theme::MUTED)))
+                            .cursor_pointer()
+                            .on_drag(ScrollThumb, |_, _, _, cx| cx.new(|_| ScrollThumb)),
+                    )
+            })
     }
 
     /// One column of the board, for a subgroup or, as "Sin subgrupo", for the
@@ -2090,7 +2233,16 @@ impl Root {
                     .pl(px(16.))
                     .text_xs()
                     .text_color(rgb(theme::MUTED))
-                    .child(ui::pill(action.label, action.color))
+                    // In a column, a lone pill measures as zero wide; a row
+                    // around it gives it its content's width.
+                    .child(
+                        div()
+                            .flex()
+                            .min_w(px(0.))
+                            .max_w_full()
+                            .when(compact, |this| this.w_full())
+                            .child(ui::pill(action.label, action.color)),
+                    )
                     .child(
                         div()
                             .flex()
@@ -2488,6 +2640,15 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &ShowMine, _window, cx| this.show(Tab::Mine, cx)))
             .on_action(cx.listener(|this, _: &ShowMerged, _window, cx| this.show(Tab::Merged, cx)))
             .on_key_down(cx.listener(|this, event, _window, cx| this.edit_key(event, cx)))
+            // Letting go of the scrollbar's thumb, anywhere.
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| this.stop_dragging(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| this.stop_dragging(cx)),
+            )
             .flex()
             .flex_col()
             .gap_3()
