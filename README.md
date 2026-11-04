@@ -1,4 +1,4 @@
-# gh-pr-status
+# PR Manager
 
 App nativa de macOS para ver el estado de tus pull requests abiertos en GitHub, escrita con
 [GPUI](https://www.gpui.rs/), el framework de UI acelerado por GPU de Zed. Agrupa tus PRs
@@ -73,7 +73,7 @@ export GH_PR_STATUS_SLACK_TEAM=T0123456789
 ```sh
 git clone https://github.com/patriciogutierrez/gh-pr-status.git
 cd gh-pr-status
-scripts/bundle.sh --install   # compila en release y deja "GH PR Status.app" en ~/Applications
+scripts/bundle.sh --install   # compila en release y deja "PR Manager.app" en ~/Applications
 ```
 
 Ábrela desde Spotlight, Finder o el Dock. La primera compilación de GPUI demora varios
@@ -86,7 +86,8 @@ Una app abierta desde Finder **no hereda las variables de tu shell**, así que
 
 El script también firma la app ad-hoc, suficiente para una app compilada y usada en el
 mismo Mac. Con `--install` la app se mueve a `~/Applications`, así Spotlight encuentra una sola
-copia; sin `--install` queda en `target/release/bundle/`.
+copia; sin `--install` queda en `target/release/bundle/`. El ícono sale de `assets/AppIcon.icns`;
+`scripts/icon.sh` lo regenera a partir del dibujo en `scripts/icon.swift`.
 
 ### 4. Permitir las notificaciones
 

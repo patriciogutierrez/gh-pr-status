@@ -13,7 +13,7 @@ use crate::pipeline::{Env, Milestone};
 use crate::tool;
 
 /// The app's bundle identifier; must match `BUNDLE_ID` in `scripts/bundle.sh`.
-const BUNDLE_ID: &str = "com.patriciogutierrez.gh-pr-status";
+const BUNDLE_ID: &str = "com.patriciogutierrez.pr-manager";
 
 /// What was last seen of a PR.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn a_click_brings_the_installed_app_forward() {
         let executable =
-            Path::new("/Users/me/Applications/GH PR Status.app/Contents/MacOS/gh-pr-status");
+            Path::new("/Users/me/Applications/PR Manager.app/Contents/MacOS/gh-pr-status");
 
         let action = click_action("https://github.com/x/pull/1", Some(executable));
 

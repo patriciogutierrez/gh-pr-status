@@ -12,9 +12,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-APP_NAME="GH PR Status"
+APP_NAME="PR Manager"
 BINARY="gh-pr-status"
-BUNDLE_ID="com.patriciogutierrez.gh-pr-status"
+BUNDLE_ID="com.patriciogutierrez.pr-manager"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 APP="$TARGET_DIR/release/bundle/$APP_NAME.app"
@@ -22,8 +22,9 @@ APP="$TARGET_DIR/release/bundle/$APP_NAME.app"
 cargo build --release
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$TARGET_DIR/release/$BINARY" "$APP/Contents/MacOS/$BINARY"
+cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 xml_escape() {
   local text="$1"
@@ -55,6 +56,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>$BUNDLE_ID</string>
   <key>CFBundleExecutable</key>
   <string>$BINARY</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleVersion</key>
