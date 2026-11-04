@@ -90,7 +90,7 @@ fn parse_choices(list: &str) -> Vec<Choice> {
 }
 
 /// The name with its accents dropped: `Bastián` reads `Bastian`.
-fn plain(name: &str) -> String {
+pub fn plain(name: &str) -> String {
     name.chars()
         .map(|c| match c {
             'á' | 'à' | 'ä' | 'â' => 'a',
