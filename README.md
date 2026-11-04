@@ -119,8 +119,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
 - **Grupos**, en la barra izquierda, para ordenar los PRs cuando son muchos. Arrastra una fila
   (abierta o mergeada) a un grupo para moverla ahí, a «Sin grupo» para sacarla, o a
   «+ Nuevo grupo» para crear uno con ella adentro. Al elegir un grupo, las dos pestañas
-  muestran solo sus PRs, y «Mis PRs» agrega al final sus mergeados, así ves en una sola vista
-  lo que falta y lo que ya salió. Clic derecho sobre un grupo para renombrarlo o eliminarlo
+  muestran solo sus PRs. Clic derecho sobre un grupo para renombrarlo o eliminarlo
   (sus PRs vuelven a «Sin grupo»). Un PR está en un solo grupo y se recuerda por su URL, así
   que sigue ahí después de mergearse. Arrastra la línea entre la barra y los PRs para
   cambiar su ancho, que se recuerda al reiniciar. Se guardan en
@@ -132,8 +131,8 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   reiniciar; un grupo plegado se marca como elegido cuando uno de sus subgrupos lo está.
   Eliminar un grupo elimina también sus subgrupos. En «Mis PRs», un grupo con
   subgrupos se ve como tablero: una columna por subgrupo (y «Sin subgrupo» primero, si el
-  grupo tiene PRs propios) con tarjetas compactas ordenadas por estado y sus mergeados
-  colapsados al final. Arrastra una tarjeta a otra columna para cambiarla de subgrupo. Las
+  grupo tiene PRs propios) con tarjetas compactas ordenadas por estado. Arrastra una tarjeta a
+  otra columna para cambiarla de subgrupo. Las
   columnas se desplazan hacia el lado con el trackpad o con la rueda.
 - **Un agente por grupo**, en [Orca](https://github.com/stablyai/orca). Con un grupo elegido,
   el botón **Agente** (o clic derecho → «Abrir agente en Orca») abre una pestaña de Orca con
@@ -178,8 +177,8 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
 - **Clic en el título** abre el PR en el navegador.
 - **El menú del PR**, con el «⋯» que aparece al pasar el mouse o con clic derecho, reúne sus
   acciones: pedir al agente (salvo cuando lo que falta es responder hilos de review), solicitar
-  review, `/deploy`, ver los logs de cada check fallido (menos docs-check), copiar la URL y
-  sacarlo del grupo.
+  review, marcar un borrador listo para review (`gh pr ready`), `/deploy`, ver los logs de
+  cada check fallido (menos docs-check), copiar la URL y sacarlo del grupo.
 - **Solicitar review** abre un formulario en una ventana aparte: reviewer (de la lista de
   `GH_PR_STATUS_REVIEWERS`), urgencia (highest, high, medium, low), canal, comentario, y el
   link del PR ya puesto. «Enviar a Slack» (o enter) hace un `POST` al webhook del workflow de
