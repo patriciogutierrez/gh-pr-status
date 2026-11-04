@@ -177,6 +177,15 @@ impl Render for ScrollThumb {
     }
 }
 
+/// What the board carries while its empty space is dragged to pan it.
+struct PanBoard;
+
+impl Render for PanBoard {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
 /// What a PR row carries while it is dragged onto a group.
 #[derive(Clone)]
 struct Dragged {
@@ -323,6 +332,9 @@ struct Root {
     /// Whether the scrollbar's thumb is being dragged; hover doesn't count
     /// during a drag, and the bar must not vanish under the cursor.
     board_dragging: bool,
+    /// Where the mouse went down on the board and how far it was scrolled
+    /// then, so dragging the board's empty space pans it.
+    pan_from: Option<(f32, f32)>,
     /// When a review was last asked for through Slack, by PR URL, in seconds
     /// since the epoch.
     review_asked: HashMap<String, i64>,
@@ -349,6 +361,7 @@ impl Root {
             threads_open: HashSet::new(),
             board_scroll: gpui::ScrollHandle::new(),
             board_dragging: false,
+            pan_from: None,
             review_asked: HashMap::new(),
             focus_handle: cx.focus_handle(),
         };
@@ -1777,6 +1790,11 @@ impl Root {
                             this.scroll_board_to(event.event.position.x, event.bounds, cx)
                         },
                     ))
+                    .on_drag_move(cx.listener(
+                        |this, event: &gpui::DragMoveEvent<PanBoard>, _window, cx| {
+                            this.pan_board(event.event.position.x, cx)
+                        },
+                    ))
                     .child(
                         div()
                             .id("board")
@@ -1787,6 +1805,14 @@ impl Root {
                             .overflow_x_scroll()
                             .map(own_axis_only)
                             .track_scroll(&self.board_scroll)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseDownEvent, _window, _cx| {
+                                    let scrolled = -f32::from(this.board_scroll.offset().x);
+                                    this.pan_from = Some((f32::from(event.position.x), scrolled));
+                                }),
+                            )
+                            .on_drag(PanBoard, |_, _, _, cx| cx.new(|_| PanBoard))
                             .children(columns),
                     )
                     .child(self.board_scrollbar()),
@@ -1811,10 +1837,27 @@ impl Root {
     }
 
     fn stop_dragging(&mut self, cx: &mut Context<Self>) {
+        self.pan_from = None;
         if self.board_dragging {
             self.board_dragging = false;
             cx.notify();
         }
+    }
+
+    /// Pans the board along with a drag of its empty space: the content
+    /// follows the cursor from where the mouse went down.
+    fn pan_board(&mut self, cursor: Pixels, cx: &mut Context<Self>) {
+        let Some((from_x, from_offset)) = self.pan_from else {
+            return;
+        };
+        let viewport = f32::from(self.board_scroll.bounds().size.width);
+        let content = viewport + f32::from(self.board_scroll.max_offset().width);
+        let offset =
+            (from_offset + from_x - f32::from(cursor)).clamp(0., (content - viewport).max(0.));
+        self.board_scroll
+            .set_offset(Point::new(px(-offset), px(0.)));
+        self.board_dragging = true;
+        cx.notify();
     }
 
     /// A thin horizontal scrollbar under the columns, shown while the mouse

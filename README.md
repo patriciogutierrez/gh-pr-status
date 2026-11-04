@@ -133,8 +133,8 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   subgrupos se ve como tablero: una columna por subgrupo (y «Sin subgrupo» primero, si el
   grupo tiene PRs propios) con tarjetas compactas ordenadas por estado. Arrastra una tarjeta a
   otra columna para cambiarla de subgrupo. Las columnas se desplazan hacia el lado con el
-  trackpad o con shift+rueda, y al pasar el mouse aparece una barra abajo cuyo pulgar se puede
-  arrastrar.
+  trackpad o con shift+rueda, arrastrando el espacio vacío del tablero, y con la barra que
+  aparece abajo al pasar el mouse, cuyo pulgar se puede arrastrar.
 - **Un agente por grupo**, en [Orca](https://github.com/stablyai/orca). Con un grupo elegido,
   el botón **Agente** (o clic derecho → «Abrir agente en Orca») abre una pestaña de Orca con
   `claude --add-dir ~/code`, para conversar qué hay que hacer y en qué repos. La primera vez
