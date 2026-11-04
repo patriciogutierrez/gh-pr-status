@@ -47,6 +47,10 @@ de deploy** (ver [El pipeline](#el-pipeline)):
 | `GH_PR_STATUS_GCP_DEVELOPMENT` | Proyecto de GCP de development | `acme-dev` |
 | `GH_PR_STATUS_SLACK_CHANNEL` | ID del canal de Slack donde inicias tu workflow (por ejemplo, pedir review). Agrega «Pedir review en Slack» al menú de cada PR | `C0123456789` |
 | `GH_PR_STATUS_CODE_DIR` | Dónde están clonados los repos que lee el agente de cada grupo. Por defecto, `~/code` | `~/code` |
+| `GH_PR_STATUS_REVIEW_WEBHOOK` | URL del webhook del workflow de review de Slack (`hooks.slack.com/triggers/…`). Habilita el formulario «Pedir review en Slack…» | `https://hooks.slack.com/triggers/T…/…/…` |
+| `GH_PR_STATUS_SLACK_USER` | Tu ID de usuario de Slack, que va como requester | `U0123456789` |
+| `GH_PR_STATUS_REVIEWERS` | Los reviewers del formulario, como `Nombre:ID` separados por coma | `Ana:U01,Beto:U02` |
+| `GH_PR_STATUS_REVIEW_CHANNELS` | Los canales del formulario, igual; el primero queda preseleccionado | `team-prs:C0123456789` |
 | `GH_PR_STATUS_SLACK_TEAM` | ID del workspace de Slack (`T…`, aparece en `app.slack.com/client/<id>/…`). Con él el canal se abre directo en la app de Slack; sin él pasa por el navegador | `T0123456789` |
 
 Los proyectos de GCP solo sirven para saber en qué ambiente falló un deploy cuando el
@@ -175,10 +179,15 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
 - **El menú del PR**, con el «⋯» que aparece al pasar el mouse o con clic derecho, reúne sus
   acciones: pedir al agente, pedir review en Slack, comentar `/deploy`, ver los logs de cada
   check fallido, copiar la URL y sacarlo del grupo.
-- Con `GH_PR_STATUS_SLACK_CHANNEL` definida, **Pedir review en Slack** copia el link del PR
-  y abre ese canal en Slack. Los workflows de Slack solo se inician desde dentro de Slack, así
-  que desde ahí lo inicias (marcador del canal o menú `+`) y pegas el link. Desaparece cuando
-  el PR queda aprobado.
+- **Pedir review en Slack…** abre un formulario sobre la app: reviewer (de la lista de
+  `GH_PR_STATUS_REVIEWERS`), urgencia (highest, high, medium, low), canal, comentario, y el
+  link del PR ya puesto. «Enviar a Slack» (o enter) hace un `POST` al webhook del workflow de
+  review del equipo, que publica el pedido con su botón «aprobar»; tú vas como requester. La
+  fila dice «review pedido hace N» hasta que el PR quede aprobado (solo mientras la app esté
+  abierta). Necesita `GH_PR_STATUS_REVIEW_WEBHOOK`, `GH_PR_STATUS_SLACK_USER`,
+  `GH_PR_STATUS_REVIEWERS` y `GH_PR_STATUS_REVIEW_CHANNELS`; sin ellas, y con
+  `GH_PR_STATUS_SLACK_CHANNEL`, el menú vuelve a copiar el link y abrir el canal. El
+  comentario se escribe sin campo nativo: los acentos con tecla muerta no se componen.
 - **Comentar /deploy** comenta `/deploy` en el PR, como tu usuario de `gh`, para iniciar el
   pipeline. Pide un segundo clic de confirmación (dentro de 5 s; el menú se queda abierto) y
   no aparece en borradores ni mientras hay un deploy en curso.
@@ -275,6 +284,7 @@ cargo clippy --all-targets
 | `src/merged.rs` | Los PRs mergeados: la búsqueda en GitHub, el registro en SQLite y los días en hora local |
 | `src/notify.rs` | Detecta hitos de deploy y PRs aprobados, y manda la notificación de macOS |
 | `src/tool.rs` | Encuentra `gh` y los notificadores aunque la app no herede el `PATH` del shell |
+| `src/review.rs` | El pedido de review por el webhook del workflow de Slack y su configuración |
 | `src/stack.rs` | Stacks de PRs (base sobre la rama de otro) y gemelas [MASTER]/[DEV] |
 | `src/status.rs` | En qué grupo cae un PR, sus badges y el "hace N min" |
 | `src/ui.rs` | Botones, pestañas, el pill de la acción y los badges del pipeline |
