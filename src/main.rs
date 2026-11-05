@@ -2197,7 +2197,6 @@ impl Root {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> (usize, Vec<gpui::AnyElement>) {
-        let now = now();
         let stacked = |url: &str| {
             stacks
                 .iter()
@@ -2213,11 +2212,7 @@ impl Root {
                 }
                 None => {
                     count += 1;
-                    let color = Group::of(pull, now).color();
-                    rows.push(
-                        self.pull_block(pull, color, compact, None, cx)
-                            .into_any_element(),
-                    );
+                    rows.push(self.pull_block(pull, compact, None, cx).into_any_element());
                 }
             }
         }
@@ -2232,7 +2227,6 @@ impl Root {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let now = now();
         let base = chain[0];
         let last = chain.len() - 1;
 
@@ -2259,11 +2253,10 @@ impl Root {
                     .child(format!("{} · stack de {}", base.repo_name(), chain.len())),
             )
             .children(chain.iter().enumerate().map(|(index, pull)| {
-                let color = Group::of(pull, now).color();
                 let rail = Rail {
                     last: index == last,
                 };
-                self.pull_block(pull, color, compact, Some(rail), cx)
+                self.pull_block(pull, compact, Some(rail), cx)
                     .into_any_element()
             }))
     }
@@ -2276,7 +2269,6 @@ impl Root {
     fn pull_block(
         &self,
         pull: &PullRequest,
-        color: u32,
         compact: bool,
         rail: Option<Rail>,
         cx: &mut Context<Self>,
@@ -2315,7 +2307,7 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(state_dot(color, self.review_asked.contains_key(&pull.url)))
+                    .child(state_dot(pull, self.review_asked.contains_key(&pull.url)))
                     .child(
                         div()
                             .id(SharedString::from(format!("open-{}", pull.url)))
@@ -2667,10 +2659,19 @@ impl Rail {
     }
 }
 
-/// A PR's state, as a dot in its section's color. A teal ring around it says
-/// a review was asked for in Slack, and stays after the approval.
-fn state_dot(color: u32, asked: bool) -> impl IntoElement {
+/// A PR at a glance: a dot in its CI's color, a teal ring around it once a
+/// review was asked for in Slack, and a green check on its corner once it is
+/// approved. The section, not the dot, says what to do next.
+fn state_dot(pull: &PullRequest, asked: bool) -> impl IntoElement {
+    let ci = match pull.checks {
+        github::Checks::Passing => theme::GREEN,
+        github::Checks::Failing => theme::RED,
+        github::Checks::Pending => theme::YELLOW,
+        github::Checks::Missing => theme::MUTED,
+    };
+
     div()
+        .relative()
         .w(px(DOT_SLOT))
         .h(px(DOT_SLOT))
         .flex_shrink_0()
@@ -2679,7 +2680,31 @@ fn state_dot(color: u32, asked: bool) -> impl IntoElement {
         .justify_center()
         .rounded_full()
         .when(asked, |this| this.border_2().border_color(rgb(theme::TEAL)))
-        .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(rgb(color)))
+        .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(rgb(ci)))
+        .when(pull.review == Review::Approved, |this| {
+            // On the corner, ringed in the window's background so it reads
+            // apart from the dot and the Slack ring under it.
+            this.child(
+                div()
+                    .absolute()
+                    .right(px(-8.))
+                    .bottom(px(-7.))
+                    .w(px(13.))
+                    .h(px(13.))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(rgb(theme::BASE))
+                    .bg(rgb(theme::GREEN))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(9.))
+                    .line_height(px(9.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(theme::BASE))
+                    .child("✓"),
+            )
+        })
 }
 
 /// What else matters about a PR after its action, in one muted line: repo and

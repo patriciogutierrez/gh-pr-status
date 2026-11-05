@@ -174,7 +174,9 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
 - **Gemelas [MASTER]/[DEV]**: un PR con el mismo título bajo el otro prefijo, en el mismo
   repo, aparece en la fila como «Gemela [DEV] #N» con su CI y review. Solo entre PRs abiertos:
   una gemela cerrada sin mergear no se ve.
-- Cada fila es el título del PR, con un punto del color de su sección, y debajo la acción
+- Cada fila es el título del PR tras un punto con el color de su CI (verde, rojo, amarillo si
+  corre, gris sin checks), que lleva un ✓ verde en la esquina cuando está aprobado y el anillo
+  teal cuando el review se pidió en Slack. Debajo va la acción
   seguida de una línea gris corta: repo y número, si es borrador, si el CI está corriendo, si
   está aprobado, los comentarios y hace cuánto se actualizó. Lo demás lo dice la acción: el
   check que falla, los conflictos y a quién se espera (solo personas; los equipos que GitHub
