@@ -104,7 +104,8 @@ pub fn open<R: Requester>(
 impl<R: Requester> ReviewView<R> {
     /// Typing goes to the open choice's filter when one is open (enter picks
     /// the first match, escape closes it). Otherwise the comment field has
-    /// the keys, and only enter (send) and escape (close) are taken here.
+    /// the keys, enter included, which starts a new line; only shift-enter
+    /// (send) and escape (close) are taken here.
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         if let Some(field) = self.menu {
@@ -129,7 +130,7 @@ impl<R: Requester> ReviewView<R> {
             }
         } else {
             match keystroke.key.as_str() {
-                "enter" if !self.sending => self.send(window, cx),
+                "enter" if keystroke.modifiers.shift && !self.sending => self.send(window, cx),
                 "escape" if !self.sending => window.remove_window(),
                 _ => return,
             }
@@ -492,7 +493,7 @@ impl<R: Requester> Render for ReviewView<R> {
                         if self.sending {
                             "Enviando…"
                         } else {
-                            "Enviar a Slack"
+                            "Enviar a Slack  ⇧↩"
                         },
                         !self.sending,
                         cx.listener(|this, _event, window, cx| this.send(window, cx)),
