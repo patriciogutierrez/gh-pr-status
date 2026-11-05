@@ -2218,11 +2218,7 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(state_dot(
-                        color,
-                        pull.review != Review::Approved
-                            && self.review_asked.contains_key(&pull.url),
-                    ))
+                    .child(state_dot(color, self.review_asked.contains_key(&pull.url)))
                     .child(
                         div()
                             .id(SharedString::from(format!("open-{}", pull.url)))
@@ -2529,7 +2525,7 @@ fn section(title: &str, color: u32, rows: Vec<gpui::AnyElement>) -> impl IntoEle
 }
 
 /// A PR's state, as a dot in its section's color. A teal ring around it says
-/// a review was asked for in Slack and is still waiting.
+/// a review was asked for in Slack, and stays after the approval.
 fn state_dot(color: u32, asked: bool) -> impl IntoElement {
     div()
         .w(px(DOT_SLOT))
