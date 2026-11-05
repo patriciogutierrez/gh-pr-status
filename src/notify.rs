@@ -5,7 +5,7 @@
 //! baseline, so opening the app does not replay every old run or approval.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::github::{PullRequest, Review};
@@ -174,14 +174,12 @@ pub fn send(notice: &Notice) {
     } else {
         &notice.body
     };
-    let launched = Command::new(tool::path("terminal-notifier"))
+    let executable = std::env::current_exe().ok();
+    let launched = Command::new(notifier(executable.as_deref()))
         .args(["-title", &option_value(&notice.title)])
         .args(["-subtitle", &option_value(&notice.subtitle)])
         .args(["-message", &option_value(message)])
-        .args(click_action(
-            &notice.url,
-            std::env::current_exe().ok().as_deref(),
-        ))
+        .args(click_action(&notice.url, executable.as_deref()))
         .args(["-sound", "Glass"])
         .status()
         .is_ok();
@@ -198,6 +196,20 @@ pub fn send(notice: &Notice) {
     let _ = Command::new(tool::path("osascript"))
         .args(["-e", &script])
         .status();
+}
+
+/// The notifier to send through: the app's own copy, which shows the app's
+/// icon, when running as the installed `.app` that carries one; otherwise
+/// the one on the path.
+fn notifier(executable: Option<&Path>) -> PathBuf {
+    let bundled = executable
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|contents| {
+            contents.join("Helpers/PR Manager Notifier.app/Contents/MacOS/terminal-notifier")
+        })
+        .filter(|path| path.is_file());
+    bundled.unwrap_or_else(|| tool::path("terminal-notifier"))
 }
 
 /// What clicking the notification does: bring the app forward when it runs as

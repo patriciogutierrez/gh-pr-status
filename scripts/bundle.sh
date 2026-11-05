@@ -75,6 +75,27 @@ $ENVIRONMENT  </dict>
 </plist>
 PLIST
 
+# macOS draws a notification with the icon of the app that sent it, so the
+# app carries its own copy of terminal-notifier, renamed and with the app's
+# icon, and sends through it. Without terminal-notifier installed, the app
+# falls back to whichever one it finds.
+NOTIFIER_SRC="$(brew --prefix terminal-notifier 2>/dev/null)/terminal-notifier.app"
+NOTIFIER="$APP/Contents/Helpers/$APP_NAME Notifier.app"
+if [[ -d "$NOTIFIER_SRC" ]]; then
+  mkdir -p "$APP/Contents/Helpers"
+  cp -R "$NOTIFIER_SRC" "$NOTIFIER"
+  chmod -R u+w "$NOTIFIER"
+  rm -rf "$NOTIFIER/Contents/_CodeSignature" "$NOTIFIER/Contents/Resources/Terminal.icns"
+  cp assets/AppIcon.icns "$NOTIFIER/Contents/Resources/AppIcon.icns"
+  plist="$NOTIFIER/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID.notifier" "$plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_NAME" "$plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$plist"
+  codesign --force --sign - "$NOTIFIER"
+else
+  echo "Sin terminal-notifier (brew install terminal-notifier): las notificaciones no llevan el ícono de la app"
+fi
+
 # Ad-hoc signature over the whole bundle, so the Info.plist is sealed with the
 # binary. Enough for an app built and run on this same Mac.
 codesign --force --sign - "$APP"
