@@ -23,6 +23,7 @@ mod review_view;
 mod slack;
 mod stack;
 mod status;
+mod text_input;
 mod theme;
 mod tool;
 mod ui;
@@ -2850,6 +2851,31 @@ fn main() {
             KeyBinding::new("cmd-r", Refresh, Some("Root")),
             KeyBinding::new("cmd-1", ShowMine, Some("Root")),
             KeyBinding::new("cmd-2", ShowMerged, Some("Root")),
+            // The comment field of the review window.
+            KeyBinding::new("backspace", text_input::Backspace, Some("TextInput")),
+            KeyBinding::new("delete", text_input::Delete, Some("TextInput")),
+            KeyBinding::new(
+                "cmd-backspace",
+                text_input::DeleteToStart,
+                Some("TextInput"),
+            ),
+            KeyBinding::new("alt-backspace", text_input::DeleteWord, Some("TextInput")),
+            KeyBinding::new("left", text_input::Left, Some("TextInput")),
+            KeyBinding::new("right", text_input::Right, Some("TextInput")),
+            KeyBinding::new("shift-left", text_input::SelectLeft, Some("TextInput")),
+            KeyBinding::new("shift-right", text_input::SelectRight, Some("TextInput")),
+            KeyBinding::new("cmd-left", text_input::Home, Some("TextInput")),
+            KeyBinding::new("cmd-right", text_input::End, Some("TextInput")),
+            KeyBinding::new("home", text_input::Home, Some("TextInput")),
+            KeyBinding::new("end", text_input::End, Some("TextInput")),
+            KeyBinding::new("up", text_input::Home, Some("TextInput")),
+            KeyBinding::new("down", text_input::End, Some("TextInput")),
+            KeyBinding::new("shift-cmd-left", text_input::SelectHome, Some("TextInput")),
+            KeyBinding::new("shift-cmd-right", text_input::SelectEnd, Some("TextInput")),
+            KeyBinding::new("cmd-a", text_input::SelectAll, Some("TextInput")),
+            KeyBinding::new("cmd-c", text_input::Copy, Some("TextInput")),
+            KeyBinding::new("cmd-x", text_input::Cut, Some("TextInput")),
+            KeyBinding::new("cmd-v", text_input::Paste, Some("TextInput")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(960.), px(760.)), cx);
