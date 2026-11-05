@@ -86,7 +86,9 @@ Una app abierta desde Finder **no hereda las variables de tu shell**, así que
 
 El script también firma la app ad-hoc, suficiente para una app compilada y usada en el
 mismo Mac. Con `--install` la app se mueve a `~/Applications`, así Spotlight encuentra una sola
-copia; sin `--install` queda en `target/release/bundle/`. El ícono sale de `assets/AppIcon.icns`;
+copia; sin `--install` queda en `target/release/bundle/`. El ícono sale de `assets/AppIcon.icns`,
+y el script mete dentro de la app una copia de `terminal-notifier` con ese ícono, para que las
+notificaciones lo muestren (macOS dibuja siempre el ícono de la app que notifica);
 `scripts/icon.sh` lo regenera a partir del dibujo en `scripts/icon.swift`.
 
 ### 4. Permitir las notificaciones
