@@ -197,7 +197,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   `GH_PR_STATUS_REVIEWERS`; al abrir la lista se puede escribir para filtrarla, sin importar
   mayúsculas ni tildes, y enter elige la primera coincidencia), urgencia (highest, high,
   medium, low), canal, comentario, y el
-  link del PR ya puesto. «Enviar» (o shift+enter; enter hace un salto de línea en el comentario) hace un `POST` al webhook del workflow de
+  link del PR ya puesto. «Enviar» (o cmd+enter; enter hace un salto de línea en el comentario) hace un `POST` al webhook del workflow de
   review del equipo, que publica el pedido con su botón «aprobar»; tú vas como requester. La
   fila dice «review pedido hace N» hasta que el PR quede aprobado, su punto de estado lleva un
   anillo teal (que se queda después de la aprobación), y el menú deja de ofrecer
