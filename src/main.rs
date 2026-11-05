@@ -12,6 +12,7 @@
 //! approved.
 
 mod db;
+mod dock;
 mod folders;
 mod github;
 mod merged;
@@ -335,6 +336,8 @@ struct Root {
     pan_from: Option<(f32, f32)>,
     /// The reviews asked for through Slack, by PR URL.
     review_asked: HashMap<String, review::Asked>,
+    /// What the Dock icon's badge shows, so it is only set when it changes.
+    badge: usize,
     focus_handle: FocusHandle,
 }
 
@@ -360,6 +363,7 @@ impl Root {
             board_dragging: false,
             pan_from: None,
             review_asked: HashMap::new(),
+            badge: 0,
             focus_handle: cx.focus_handle(),
         };
         root.start_clock(cx);
@@ -473,6 +477,7 @@ impl Root {
             this.update(cx, |this, cx| {
                 if let Ok(snapshot) = &result {
                     this.notify_changes(&snapshot.pulls, cx);
+                    this.update_badge(&snapshot.pulls);
                     this.refresh_replies(&snapshot.pulls, cx);
                     // Without Orca there are no worktrees, and nothing to claim.
                     if let Ok(worktrees) = worktrees {
@@ -488,6 +493,19 @@ impl Root {
             .ok();
         })
         .detach();
+    }
+
+    /// Puts on the Dock icon how many of the user's PRs are ready to merge.
+    fn update_badge(&mut self, pulls: &[PullRequest]) {
+        let now = now();
+        let ready = pulls
+            .iter()
+            .filter(|pull| Group::of(pull, now) == Group::Ready)
+            .count();
+        if ready != self.badge {
+            self.badge = ready;
+            dock::set_badge(ready);
+        }
     }
 
     fn notify_changes(&mut self, pulls: &[PullRequest], cx: &mut Context<Self>) {
