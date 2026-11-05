@@ -2658,7 +2658,13 @@ fn steps(pull: &PullRequest, run: &Pipeline) -> impl IntoElement {
 }
 
 impl review_view::Requester for Root {
-    fn review_asked(&mut self, url: &str, channel: &str, cx: &mut Context<Self>) {
+    fn review_asked(
+        &mut self,
+        url: &str,
+        channel: &str,
+        github: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let asked = review::Asked {
             at: now(),
             channel: channel.to_string(),
@@ -2668,6 +2674,11 @@ impl review_view::Requester for Root {
         let saved = url.to_string();
         self.save(cx, move || review::remember(&saved, &asked));
         self.locate_request(url, cx);
+        if github.is_some() {
+            self.folders_error = github;
+        }
+        // The reviewer just asked on GitHub shows on the next load.
+        self.reload(cx);
         cx.notify();
     }
 }

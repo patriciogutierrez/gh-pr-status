@@ -189,6 +189,21 @@ pub fn mark_ready(url: &str) -> Result<(), String> {
     gh(&["pr".to_string(), "ready".to_string(), url.to_string()]).map(|_| ())
 }
 
+/// Asks `login` for a review of the PR. Asking the PR's own author is
+/// refused by GitHub and skipped here.
+pub fn request_review(url: &str, login: &str) -> Result<(), String> {
+    match gh(&[
+        "pr".to_string(),
+        "edit".to_string(),
+        url.to_string(),
+        "--add-reviewer".to_string(),
+        login.to_string(),
+    ]) {
+        Err(error) if error.contains("pull request author") => Ok(()),
+        result => result.map(|_| ()),
+    }
+}
+
 /// Runs `gh` and returns its stdout, or an error worth showing as is.
 pub fn gh(args: &[String]) -> Result<Vec<u8>, String> {
     let output = Command::new(tool::path("gh"))

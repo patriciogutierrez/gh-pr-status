@@ -26,9 +26,15 @@ enum Field {
 
 /// What the main window hears back once the request is sent.
 pub trait Requester: 'static {
-    /// The request for `url` went to `channel`.
-    fn review_asked(&mut self, url: &str, channel: &str, cx: &mut Context<Self>)
-    where
+    /// The request for `url` went to `channel`; `github` is why asking on
+    /// GitHub too failed, when it did.
+    fn review_asked(
+        &mut self,
+        url: &str,
+        channel: &str,
+        github: Option<String>,
+        cx: &mut Context<Self>,
+    ) where
         Self: Sized;
 }
 
@@ -158,8 +164,9 @@ impl<R: Requester> ReviewView<R> {
             .collect()
     }
 
-    /// Posts the request; the window closes once Slack accepts it, and the
-    /// main window hears which PR it was for.
+    /// Posts the request, then asks the reviewer on GitHub too when their
+    /// login is known; the window closes once Slack accepts it, and the main
+    /// window hears which PR it was for.
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(reviewer), Some(channel)) = (
             self.reviewer
@@ -177,6 +184,7 @@ impl<R: Requester> ReviewView<R> {
             comment: self.comment.read(cx).text().trim().to_string(),
             pr_url: self.url.clone(),
         };
+        let github = reviewer.github.clone();
         let config = self.config.clone();
         self.sending = true;
         self.error = None;
@@ -185,11 +193,18 @@ impl<R: Requester> ReviewView<R> {
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { review::send(&config, &request) })
+                .spawn(async move {
+                    review::send(&config, &request)?;
+                    Ok(github
+                        .and_then(|login| {
+                            crate::github::request_review(&request.pr_url, &login).err()
+                        })
+                        .map(|error| format!("Pedido en Slack, pero no en GitHub: {error}")))
+                })
                 .await;
 
             this.update_in(cx, |this, window, cx| match result {
-                Ok(()) => {
+                Ok(github) => {
                     let url = this.url.clone();
                     let channel = this
                         .config
@@ -198,7 +213,7 @@ impl<R: Requester> ReviewView<R> {
                         .map(|c| c.id.clone())
                         .unwrap_or_default();
                     this.root
-                        .update(cx, |root, cx| root.review_asked(&url, &channel, cx))
+                        .update(cx, |root, cx| root.review_asked(&url, &channel, github, cx))
                         .ok();
                     window.remove_window();
                 }

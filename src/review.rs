@@ -31,6 +31,8 @@ pub const URGENCIES: [(&str, &str); 4] = [
 pub struct Choice {
     pub name: String,
     pub id: String,
+    /// The reviewer's GitHub login, when the entry gives one.
+    pub github: Option<String>,
 }
 
 /// What the form needs, read once from the environment.
@@ -71,17 +73,23 @@ pub fn config() -> Option<Config> {
     (!config.reviewers.is_empty() && !config.channels.is_empty()).then_some(config)
 }
 
-/// `Name:ID,Name:ID`, in alphabetical order and without accents; entries
-/// without a colon are skipped.
+/// `Name:ID,Name:ID:login`, in alphabetical order and without accents; a
+/// third field is the reviewer's GitHub login. Entries without a colon are
+/// skipped.
 fn parse_choices(list: &str) -> Vec<Choice> {
     let mut choices: Vec<Choice> = list
         .split(',')
         .filter_map(|entry| {
-            let (name, id) = entry.split_once(':')?;
-            let (name, id) = (plain(name.trim()), id.trim());
+            let mut fields = entry.split(':').map(str::trim);
+            let (name, id) = (plain(fields.next()?), fields.next()?);
+            let github = fields
+                .next()
+                .filter(|login| !login.is_empty())
+                .map(str::to_string);
             (!name.is_empty() && !id.is_empty()).then(|| Choice {
                 name,
                 id: id.to_string(),
+                github,
             })
         })
         .collect();
@@ -258,22 +266,25 @@ mod tests {
 
     #[test]
     fn choices_come_as_name_colon_id_pairs_sorted_and_without_accents() {
-        let choices = parse_choices("Pato:U1, Matute : U2,sin-id,:U3,Bastián:U4");
+        let choices = parse_choices("Pato:U1, Matute : U2 : nmaturana,sin-id,:U3,Bastián:U4");
 
         assert_eq!(
             choices,
             [
                 Choice {
                     name: "Bastian".to_string(),
-                    id: "U4".to_string()
+                    id: "U4".to_string(),
+                    github: None,
                 },
                 Choice {
                     name: "Matute".to_string(),
-                    id: "U2".to_string()
+                    id: "U2".to_string(),
+                    github: Some("nmaturana".to_string()),
                 },
                 Choice {
                     name: "Pato".to_string(),
-                    id: "U1".to_string()
+                    id: "U1".to_string(),
+                    github: None,
                 },
             ]
         );
