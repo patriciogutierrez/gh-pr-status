@@ -120,6 +120,11 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   GitHub devuelve menos resultados de los que cuenta, guarda los que llegaron y vuelve a pedir
   los mismos días en la siguiente. Muestra los últimos 60 días; los anteriores quedan en el
   archivo. Borrarlo reinicia el registro.
+- **Cuenta**, arriba a la izquierda: elige tu usuario o una organización (por ejemplo,
+  `Toku-IA`) para ver solo sus PRs, en las dos pestañas y en los grupos. Un grupo con PRs de
+  varias cuentas sigue apareciendo, con solo los de la cuenta elegida; uno cuyos PRs son todos
+  de otra cuenta se oculta. «Todas las cuentas» quita el filtro. La elección se recuerda al
+  reiniciar.
 - **Grupos**, en la barra izquierda, para ordenar los PRs cuando son muchos. Arrastra una fila
   (abierta o mergeada) a un grupo para moverla ahí, a «Sin grupo» para sacarla, o a
   «+ Nuevo grupo» para crear uno con ella adentro. Al elegir un grupo, las dos pestañas
