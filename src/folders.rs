@@ -14,8 +14,6 @@ use crate::db;
 
 /// Where the sidebar's width is remembered.
 const SIDEBAR_WIDTH: &str = "sidebar_width";
-/// Where the account the PRs are filtered to is remembered; empty for none.
-const OWNER: &str = "owner";
 /// Where the folded folders are remembered, as comma-separated ids.
 const COLLAPSED: &str = "collapsed";
 /// Where each folder's agent folder is remembered, followed by the folder id.
@@ -119,15 +117,6 @@ pub fn save_sidebar_width(width: f32) -> Result<(), String> {
     write_setting(&open()?, SIDEBAR_WIDTH, &width.to_string())
 }
 
-/// The account, user or organization, the user last filtered the PRs to.
-pub fn owner() -> Result<Option<String>, String> {
-    read_owner(&open()?)
-}
-
-pub fn save_owner(owner: Option<&str>) -> Result<(), String> {
-    write_setting(&open()?, OWNER, owner.unwrap_or_default())
-}
-
 /// The folder on disk where `folder`'s agent works, once it has one.
 pub fn agent_dir(folder: i64) -> Result<Option<String>, String> {
     read_setting(&open()?, &format!("{AGENT_DIR}{folder}"))
@@ -139,10 +128,6 @@ pub fn save_agent_dir(folder: i64, dir: &str) -> Result<(), String> {
 
 fn read_width(db: &Connection) -> Result<Option<f32>, String> {
     read_setting(db, SIDEBAR_WIDTH).map(|value| value.and_then(|width| width.parse().ok()))
-}
-
-fn read_owner(db: &Connection) -> Result<Option<String>, String> {
-    read_setting(db, OWNER).map(|value| value.filter(|owner| !owner.is_empty()))
 }
 
 fn read_setting(db: &Connection, key: &str) -> Result<Option<String>, String> {
@@ -354,18 +339,6 @@ mod tests {
 
         assert_eq!(before, None);
         assert_eq!(read_width(&db).unwrap(), Some(240.));
-    }
-
-    #[test]
-    fn clearing_the_account_forgets_it() {
-        let db = db();
-        write_setting(&db, OWNER, "Toku-IA").unwrap();
-
-        let picked = read_owner(&db).unwrap();
-        write_setting(&db, OWNER, "").unwrap();
-
-        assert_eq!(picked.as_deref(), Some("Toku-IA"));
-        assert_eq!(read_owner(&db).unwrap(), None);
     }
 
     #[test]

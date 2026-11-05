@@ -129,8 +129,6 @@ enum Deploy {
 enum MenuFor {
     Pull(String),
     Folder(i64),
-    /// The account picker above the groups.
-    Owner,
 }
 
 /// The menu a right click opens, where the click happened.
@@ -328,6 +326,8 @@ struct Root {
     filter: Filter,
     /// The account, user or organization, whose PRs alone show; `None` for all.
     owner: Option<String>,
+    /// Whether the account picker's options are open.
+    owners_open: bool,
     editor: Option<Editor>,
     /// The sidebar entry under the mouse, whose name scrolls if it is cut.
     hovered: Option<Filter>,
@@ -365,6 +365,7 @@ impl Root {
             folders_error: None,
             filter: Filter::All,
             owner: None,
+            owners_open: false,
             editor: None,
             hovered: None,
             sidebar_width: SIDEBAR_WIDTH,
@@ -380,7 +381,6 @@ impl Root {
         root.start_clock(cx);
         Self::load_folders(cx);
         Self::load_sidebar_width(cx);
-        Self::load_owner(cx);
         Self::load_review_asked(cx);
         root
     }
@@ -798,36 +798,16 @@ impl Root {
         .detach();
     }
 
-    fn load_owner(cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async { folders::owner() })
-                .await;
-
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(owner) => this.owner = owner,
-                    Err(error) => this.folders_error = Some(error),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     /// Shows only `owner`'s PRs, or everyone's. A group whose PRs are all
     /// another account's hides, so a selected one gives way to "Todos".
     fn pick_owner(&mut self, owner: Option<String>, cx: &mut Context<Self>) {
         self.owner = owner;
+        self.owners_open = false;
         if let Filter::Folder(id) = self.filter
             && self.hidden(id)
         {
             self.filter = Filter::All;
         }
-        let saved = self.owner.clone();
-        self.save(cx, move || folders::save_owner(saved.as_deref()));
         cx.notify();
     }
 
@@ -1318,21 +1298,6 @@ impl Root {
     fn menu(&self, menu: &Menu, cx: &mut Context<Self>) -> impl IntoElement {
         let items: Vec<_> = match &menu.target {
             MenuFor::Pull(url) => self.pull_menu(url, cx),
-            MenuFor::Owner => std::iter::once(None)
-                .chain(self.owners().into_iter().map(Some))
-                .enumerate()
-                .map(|(index, owner)| {
-                    let mark = if owner == self.owner { "✓ " } else { "   " };
-                    let label = owner.as_deref().unwrap_or("Todas las cuentas");
-                    ui::menu_item(
-                        SharedString::from(format!("menu-owner-{index}")),
-                        format!("{mark}{label}"),
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.pick_owner(owner.clone(), cx)
-                        }),
-                    )
-                })
-                .collect(),
             MenuFor::Folder(id) => {
                 let id = *id;
                 let subgroup = self
@@ -1506,7 +1471,7 @@ impl Root {
             .w(px(self.sidebar_width))
             .flex_shrink_0()
             .overflow_y_scroll()
-            .child(self.owner_picker(cx))
+            .child(self.owner_picker(window, cx))
             .child(
                 div()
                     .px_2()
@@ -1570,37 +1535,112 @@ impl Root {
             })
     }
 
-    /// The account the PRs are filtered to, opening a menu of all of them.
-    fn owner_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The account the PRs are filtered to. Its options open right under it,
+    /// as wide as it; a click anywhere else closes them.
+    fn owner_picker(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let picked = self.owner.is_some();
+        let options: Vec<_> = std::iter::once(None)
+            .chain(self.owners().into_iter().map(Some))
+            .enumerate()
+            .map(|(index, owner)| {
+                let mark = if owner == self.owner { "✓" } else { "" };
+                let label = owner.clone().unwrap_or("Todas las cuentas".to_string());
+                div()
+                    .id(SharedString::from(format!("owner-{index}")))
+                    .flex()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+                    .child(div().w(px(12.)).flex_shrink_0().child(mark))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(label))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.pick_owner(owner.clone(), cx)
+                    }))
+            })
+            .collect();
+
         div()
-            .id("owner-picker")
-            .flex()
-            .items_center()
-            .gap_2()
             .mb_2()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(theme::BORDER))
-            .text_sm()
-            .text_color(rgb(if picked {
-                theme::ACCENT
-            } else {
-                theme::SUBTEXT
-            }))
-            .cursor_pointer()
-            .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
-            .on_mouse_down(MouseButton::Left, self.open_menu(MenuFor::Owner, cx))
             .child(
-                div().flex_1().min_w(px(0.)).truncate().child(
-                    self.owner
-                        .clone()
-                        .unwrap_or("Todas las cuentas".to_string()),
-                ),
+                div()
+                    .id("owner-picker")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .text_sm()
+                    .text_color(rgb(if picked {
+                        theme::ACCENT
+                    } else {
+                        theme::SUBTEXT
+                    }))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.owners_open = true;
+                        cx.notify();
+                    }))
+                    .child(
+                        div().flex_1().min_w(px(0.)).truncate().child(
+                            self.owner
+                                .clone()
+                                .unwrap_or("Todas las cuentas".to_string()),
+                        ),
+                    )
+                    .child(div().text_xs().text_color(rgb(theme::MUTED)).child("▾")),
             )
-            .child(div().text_xs().text_color(rgb(theme::MUTED)).child("▾"))
+            .when(self.owners_open, |this| {
+                this.child(
+                    // Covers the window so a click outside the options, the
+                    // picker included, only closes them.
+                    deferred(
+                        anchored().position(Point::default()).child(
+                            div()
+                                .id("owner-backdrop")
+                                .occlude()
+                                .w(window.viewport_size().width)
+                                .h(window.viewport_size().height)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _event, _window, cx| {
+                                        this.owners_open = false;
+                                        cx.notify();
+                                    }),
+                                ),
+                        ),
+                    )
+                    .with_priority(1),
+                )
+                .child(
+                    deferred(
+                        anchored().snap_to_window().child(
+                            div()
+                                .id("owner-options")
+                                .occlude()
+                                .mt_1()
+                                .w(px(self.sidebar_width))
+                                .flex()
+                                .flex_col()
+                                .p_1()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(theme::BORDER))
+                                .bg(rgb(theme::SURFACE))
+                                .shadow_lg()
+                                .text_sm()
+                                .children(options),
+                        ),
+                    )
+                    .with_priority(2),
+                )
+            })
     }
 
     /// One clickable line of the sidebar; a group's is also a drop target.
