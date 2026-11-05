@@ -3064,6 +3064,7 @@ fn main() {
             KeyBinding::new("cmd-1", ShowMine, Some("Root")),
             KeyBinding::new("cmd-2", ShowMerged, Some("Root")),
             // The comment field of the review window.
+            KeyBinding::new("enter", text_input::Newline, Some("TextInput")),
             KeyBinding::new("backspace", text_input::Backspace, Some("TextInput")),
             KeyBinding::new("delete", text_input::Delete, Some("TextInput")),
             KeyBinding::new(

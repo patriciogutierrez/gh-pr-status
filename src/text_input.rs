@@ -1,12 +1,12 @@
-//! A text field that wraps: a cursor, a selection, the usual keys, and the
-//! system's input method, so dead-key accents compose. Adapted from GPUI's
-//! `input` example, which is single-line; this one shapes its text with a
-//! wrap width and finds the cursor through the wrapped layout.
+//! A multi-line text field that wraps: a cursor, a selection, the usual keys,
+//! and the system's input method, so dead-key accents compose. Adapted from
+//! GPUI's `input` example, which is single-line; this one shapes each
+//! paragraph with a wrap width and finds the cursor through them.
 //!
-//! Keys are actions bound in `main` under the `TextInput` context: the
-//! arrows, shift-arrows to select, cmd-arrows for the ends, backspace and
-//! delete, cmd-backspace for the start of the text, alt-backspace for a word,
-//! cmd-a, cmd-c, cmd-x and cmd-v.
+//! Keys are actions bound in `main` under the `TextInput` context: enter for a
+//! new line, the arrows, shift-arrows to select, cmd-arrows for the ends,
+//! backspace and delete, cmd-backspace for the start of the text,
+//! alt-backspace for a word, cmd-a, cmd-c, cmd-x and cmd-v.
 
 use std::ops::Range;
 
@@ -23,6 +23,7 @@ use crate::theme;
 actions!(
     text_input,
     [
+        Newline,
         Backspace,
         Delete,
         DeleteToStart,
@@ -50,7 +51,7 @@ pub struct TextInput {
     selection_reversed: bool,
     /// Text the input method is still composing, underlined.
     marked_range: Option<Range<usize>>,
-    last_layout: Option<WrappedLine>,
+    last_layout: Option<Layout>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
 }
@@ -119,6 +120,10 @@ impl TextInput {
         self.select_to(self.content.len(), cx);
     }
 
+    fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_text_in_range(None, "\n", window, cx)
+    }
+
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx)
@@ -157,7 +162,7 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
+            self.replace_text_in_range(None, &text, window, cx);
         }
     }
 
@@ -214,14 +219,12 @@ impl TextInput {
         if self.content.is_empty() {
             return 0;
         }
-        let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
+        let (Some(bounds), Some(layout)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
         else {
             return 0;
         };
         let local = point(position.x - bounds.left(), position.y - bounds.top());
-        line.closest_index_for_position(local, LINE_HEIGHT)
-            .unwrap_or_else(|index| index)
-            .min(self.content.len())
+        layout.index_for_position(local).min(self.content.len())
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -383,8 +386,8 @@ impl EntityInputHandler for TextInput {
     ) -> Option<Bounds<Pixels>> {
         let layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
-        let start = layout.position_for_index(range.start, LINE_HEIGHT)?;
-        let end = layout.position_for_index(range.end, LINE_HEIGHT)?;
+        let start = layout.position_for_index(range.start);
+        let end = layout.position_for_index(range.end);
         Some(Bounds::from_corners(
             point(bounds.left() + start.x, bounds.top() + start.y),
             point(bounds.left() + end.x, bounds.top() + end.y + LINE_HEIGHT),
@@ -405,6 +408,79 @@ impl EntityInputHandler for TextInput {
 /// The input's line height; the layout and the cursor agree on it.
 const LINE_HEIGHT: Pixels = px(20.);
 
+/// The text as GPUI shapes it: one wrapped line per paragraph, each with the
+/// byte where it starts and how far down it is drawn.
+#[derive(Default)]
+struct Layout {
+    paragraphs: Vec<(WrappedLine, usize, Pixels)>,
+}
+
+impl Layout {
+    /// Lays out the shaped paragraphs one under the other; each starts one
+    /// byte after the previous one ends, past its newline.
+    fn new(lines: impl IntoIterator<Item = WrappedLine>) -> Self {
+        let (mut start, mut y) = (0, px(0.));
+        let paragraphs = lines
+            .into_iter()
+            .map(|line| {
+                let paragraph = (line.clone(), start, y);
+                start += line.len() + 1;
+                y += LINE_HEIGHT * (line.wrap_boundaries().len() + 1) as f32;
+                paragraph
+            })
+            .collect();
+        Self { paragraphs }
+    }
+
+    /// Where the byte at `index` is drawn, from the field's corner.
+    fn position_for_index(&self, index: usize) -> Point<Pixels> {
+        let Some((line, start, y)) = self
+            .paragraphs
+            .iter()
+            .rev()
+            .find(|(_, start, _)| *start <= index)
+        else {
+            return point(px(0.), px(0.));
+        };
+        let local = line
+            .position_for_index(index - start, LINE_HEIGHT)
+            .unwrap_or(point(px(0.), px(0.)));
+        point(local.x, local.y + *y)
+    }
+
+    /// The byte closest to `position`, from the field's corner.
+    fn index_for_position(&self, position: Point<Pixels>) -> usize {
+        let paragraph = self
+            .paragraphs
+            .iter()
+            .rev()
+            .find(|(_, _, y)| *y <= position.y)
+            .or(self.paragraphs.first());
+        let Some((line, start, y)) = paragraph else {
+            return 0;
+        };
+        let local = point(position.x, position.y - *y);
+        start
+            + line
+                .closest_index_for_position(local, LINE_HEIGHT)
+                .unwrap_or_else(|index| index)
+    }
+
+    fn paint(&self, origin: Point<Pixels>, window: &mut Window, cx: &mut App) {
+        for (line, _, y) in &self.paragraphs {
+            line.paint(
+                point(origin.x, origin.y + *y),
+                LINE_HEIGHT,
+                gpui::TextAlign::Left,
+                None,
+                window,
+                cx,
+            )
+            .ok();
+        }
+    }
+}
+
 /// The element that shapes the text at the box's width and paints it with
 /// the selection and the cursor.
 struct TextElement {
@@ -412,7 +488,7 @@ struct TextElement {
 }
 
 struct PrepaintState {
-    line: Option<WrappedLine>,
+    layout: Option<Layout>,
     cursor: Option<PaintQuad>,
     selection: Vec<PaintQuad>,
 }
@@ -507,23 +583,20 @@ impl Element for TextElement {
         };
 
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window
-            .text_system()
-            .shape_text(
-                display_text,
-                font_size,
-                &runs,
-                Some(bounds.size.width),
-                None,
-            )
-            .ok()
-            .and_then(|mut lines| lines.pop())
-            .unwrap_or_default();
+        let layout = Layout::new(
+            window
+                .text_system()
+                .shape_text(
+                    display_text,
+                    font_size,
+                    &runs,
+                    Some(bounds.size.width),
+                    None,
+                )
+                .unwrap_or_default(),
+        );
 
-        let at = |index: usize| {
-            line.position_for_index(index, LINE_HEIGHT)
-                .unwrap_or(point(px(0.), px(0.)))
-        };
+        let at = |index: usize| layout.position_for_index(index);
         let (selection, cursor) = if selected_range.is_empty() {
             let position = at(cursor);
             (
@@ -559,7 +632,7 @@ impl Element for TextElement {
             (quads, None)
         };
         PrepaintState {
-            line: Some(line),
+            layout: Some(layout),
             cursor,
             selection,
         }
@@ -584,23 +657,15 @@ impl Element for TextElement {
         for quad in prepaint.selection.drain(..) {
             window.paint_quad(quad);
         }
-        let line = prepaint.line.take().unwrap_or_default();
-        line.paint(
-            bounds.origin,
-            LINE_HEIGHT,
-            gpui::TextAlign::Left,
-            None,
-            window,
-            cx,
-        )
-        .ok();
+        let layout = prepaint.layout.take().unwrap_or_default();
+        layout.paint(bounds.origin, window, cx);
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
         {
             window.paint_quad(cursor);
         }
         self.input.update(cx, |input, _cx| {
-            input.last_layout = Some(line);
+            input.last_layout = Some(layout);
             input.last_bounds = Some(bounds);
         });
     }
@@ -612,6 +677,7 @@ impl Render for TextInput {
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
+            .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::delete_to_start))
