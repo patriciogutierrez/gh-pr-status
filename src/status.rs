@@ -118,11 +118,7 @@ pub fn action(pull: &PullRequest, below: Option<&PullRequest>, now: i64) -> Acti
                 Some(label),
             )
         } else if let Some(below) = below {
-            act(
-                format!("Esperando el merge de #{} (borrador)", below.number),
-                theme::MUTED,
-                None,
-            )
+            act(format!("Espera a #{}", below.number), theme::MUTED, None)
         } else {
             act("Sacar de borrador".to_string(), theme::MUTED, None)
         };
@@ -150,11 +146,7 @@ pub fn action(pull: &PullRequest, below: Option<&PullRequest>, now: i64) -> Acti
         return act(label.clone(), theme::RED, Some(label));
     }
     if let Some(below) = below {
-        return act(
-            format!("Esperando el merge de #{}", below.number),
-            theme::YELLOW,
-            None,
-        );
+        return act(format!("Espera a #{}", below.number), theme::YELLOW, None);
     }
     if !pull.threads.is_empty() {
         let label = match pull.threads.len() {
@@ -171,7 +163,15 @@ pub fn action(pull: &PullRequest, below: Option<&PullRequest>, now: i64) -> Acti
     }
     if pull.review != Review::Approved && !pull.requested_reviewers.is_empty() {
         return act(
-            format!("Esperando review de {}", names(&pull.requested_reviewers)),
+            format!("Esperando a {}", names(&pull.requested_reviewers)),
+            theme::YELLOW,
+            None,
+        );
+    }
+    // Teams come from CODEOWNERS; nobody in particular to wait for.
+    if pull.review != Review::Approved && !pull.requested_teams.is_empty() {
+        return act(
+            "Esperando review del equipo".to_string(),
             theme::YELLOW,
             None,
         );
@@ -305,6 +305,7 @@ mod tests {
             review: Review::Approved,
             approvers: Vec::new(),
             requested_reviewers: Vec::new(),
+            requested_teams: Vec::new(),
             mergeable: Mergeable::Clean,
             comments: 0,
             threads: Vec::new(),
@@ -487,10 +488,10 @@ mod tests {
             .label,
             "Arreglar CI: pytest, docs-check"
         );
-        assert_eq!(stacked.label, "Esperando el merge de #1");
+        assert_eq!(stacked.label, "Espera a #1");
         assert_eq!(threaded.label, "Responder 1 hilo de review");
         assert!(threaded.task.is_some());
-        assert_eq!(asked.label, "Esperando review de @carla");
+        assert_eq!(asked.label, "Esperando a @carla");
         assert_eq!(asked.task, None);
         assert_eq!(to_publish.label, "Sacar de borrador");
         assert_eq!(ready.label, "Mergear");

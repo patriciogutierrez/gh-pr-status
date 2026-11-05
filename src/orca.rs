@@ -536,6 +536,7 @@ mod tests {
             review: Review::Missing,
             approvers: Vec::new(),
             requested_reviewers: Vec::new(),
+            requested_teams: Vec::new(),
             mergeable: Mergeable::Clean,
             comments: 0,
             threads: Vec::new(),
