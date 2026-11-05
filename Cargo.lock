@@ -2010,7 +2010,9 @@ name = "gh-pr-status"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "cocoa 0.26.0",
  "gpui",
+ "objc",
  "rusqlite",
  "serde_json",
 ]

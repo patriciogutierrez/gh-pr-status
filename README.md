@@ -206,6 +206,8 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
 - **Deploy** comenta `/deploy` en el PR, como tu usuario de `gh`, para iniciar el
   pipeline. Antes pregunta en el diálogo del sistema (enter confirma, escape cancela), y no
   aparece en borradores ni mientras hay un deploy en curso.
+- El ícono del Dock lleva un **badge** con cuántos de tus PRs están listos para merge
+  (aprobados, CI verde y sin conflictos); sin ninguno, no muestra nada.
 - Las listas se recargan solas cada minuto; mientras alguno de tus PRs está desplegando,
   "Mis PRs" se recarga cada 20 s.
 
