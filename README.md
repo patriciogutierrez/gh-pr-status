@@ -49,7 +49,7 @@ de deploy** (ver [El pipeline](#el-pipeline)):
 | `GH_PR_STATUS_CODE_DIR` | Dónde están clonados los repos que lee el agente de cada grupo. Por defecto, `~/code` | `~/code` |
 | `GH_PR_STATUS_REVIEW_WEBHOOK` | URL del webhook del workflow de review de Slack (`hooks.slack.com/triggers/…`). Habilita el formulario «Solicitar review» | `https://hooks.slack.com/triggers/T…/…/…` |
 | `GH_PR_STATUS_SLACK_USER` | Tu ID de usuario de Slack, que va como requester | `U0123456789` |
-| `GH_PR_STATUS_REVIEWERS` | Los reviewers del formulario, como `Nombre:ID` separados por coma | `Ana:U01,Beto:U02` |
+| `GH_PR_STATUS_REVIEWERS` | Los reviewers del formulario, como `Nombre:IDdeSlack` o `Nombre:IDdeSlack:loginDeGitHub` separados por coma. Con el login, el pedido también lo asigna como reviewer en GitHub | `Ana:U01:ana-gh,Beto:U02` |
 | `GH_PR_STATUS_SLACK_TOKEN` | Token de usuario de Slack (`xoxp-…`) con `channels:history` y `groups:history`, para ubicar el pedido de review y contar sus respuestas | `xoxp-…` |
 | `GH_PR_STATUS_REVIEW_CHANNELS` | Los canales del formulario, igual; el primero queda preseleccionado | `team-prs:C0123456789` |
 | `GH_PR_STATUS_SLACK_TEAM` | ID del workspace de Slack (`T…`, aparece en `app.slack.com/client/<id>/…`). Con él el canal se abre directo en la app de Slack; sin él pasa por el navegador | `T0123456789` |
