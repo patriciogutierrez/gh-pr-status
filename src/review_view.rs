@@ -493,7 +493,7 @@ impl<R: Requester> Render for ReviewView<R> {
                         if self.sending {
                             "Enviando…"
                         } else {
-                            "Enviar a Slack  ⇧↩"
+                            "Enviar"
                         },
                         !self.sending,
                         cx.listener(|this, _event, window, cx| this.send(window, cx)),
