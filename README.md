@@ -165,24 +165,29 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   metadata de los bots); el clic abre el hilo en GitHub. Con hilos abiertos, la siguiente acción
   pasa a «Responder N hilos de review» y «Pedir al agente» le manda cada hilo con su link.
   Solo cuentan los hilos sobre código vigente (GitHub marca los demás como desactualizados).
-- **Stacks**: si la base de un PR es la rama de otro PR tuyo abierto, la fila muestra la
-  cadena completa (`master ← #7684 ← [#7685]`) y la siguiente acción pasa a «Esperando el
-  merge de #7684»; solo el de abajo dice «Mergear». Cuando GitHub re-apunta un PR a otra base
-  (al mergearse el de abajo), llega una notificación: es el momento de sacarlo de borrador.
+- **Stacks**: si la base de un PR es la rama de otro PR tuyo abierto, el stack se dibuja
+  junto, en la lista y en el tablero: bajo la rama en que termina (`master`), de la base hacia
+  arriba, con un riel a la izquierda que une los puntos y una flecha en cada uno que apunta al
+  PR en que se mergea. Va entero en la sección de su base, el único que se puede mergear; los de
+  encima dicen «Espera a #7684». Cuando GitHub re-apunta un PR a otra base (al mergearse el de
+  abajo), llega una notificación: es el momento de sacarlo de borrador.
 - **Gemelas [MASTER]/[DEV]**: un PR con el mismo título bajo el otro prefijo, en el mismo
   repo, aparece en la fila como «Gemela [DEV] #N» con su CI y review. Solo entre PRs abiertos:
   una gemela cerrada sin mergear no se ve.
 - Cada fila es el título del PR, con un punto del color de su sección, y debajo la acción
-  seguida de una línea gris con repo y número, CI, review (quién aprobó o a quién se le
-  pidió), conflictos, comentarios, la rama y hace cuánto se actualizó. Si el CI falla, el
-  nombre del check va en la acción y sus logs en el menú del PR.
+  seguida de una línea gris corta: repo y número, si es borrador, si el CI está corriendo, si
+  está aprobado, los comentarios y hace cuánto se actualizó. Lo demás lo dice la acción: el
+  check que falla, los conflictos y a quién se espera (solo personas; los equipos que GitHub
+  pide por CODEOWNERS se resumen en «Esperando review del equipo»). La rama se copia desde el
+  menú del PR, y los logs de los checks también están ahí.
 - Si configuraste el bot, debajo de cada PR tuyo está su **último pipeline**: estado
   (desplegando, desplegado, falló, sin avances), la etapa actual o el primer error, y hace
   cuánto escribió el bot. **Clic en el pipeline** lo despliega: últimas 8 etapas con su
   hora, todos los errores (servicio y causa) y un botón para abrir el comentario.
 - **Clic en el título** abre el PR en el navegador.
 - **El menú del PR**, con el «⋯» que aparece al pasar el mouse o con clic derecho, reúne sus
-  acciones, en este orden: copiar la URL, ver el pedido en Slack, deploy, solicitar review,
+  acciones, en este orden: copiar la URL, copiar la rama, ver el pedido en Slack, deploy,
+  solicitar review,
   marcar un borrador listo para review (`gh pr ready`), pedir al agente (salvo cuando lo que
   falta es responder hilos de review), ver los logs de cada check fallido (menos docs-check) y
   sacarlo del grupo.

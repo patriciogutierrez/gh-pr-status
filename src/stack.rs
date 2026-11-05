@@ -42,24 +42,6 @@ pub fn chain<'a>(pull: &'a PullRequest, pulls: &'a [PullRequest]) -> Vec<&'a Pul
     }
 }
 
-/// `master ← #7684 ← #7685`, with `pull` in brackets.
-pub fn chain_label(pull: &PullRequest, pulls: &[PullRequest]) -> Option<String> {
-    let chain = chain(pull, pulls);
-    if chain.len() < 2 {
-        return None;
-    }
-    let mut label = chain[0].base.clone();
-    for member in chain {
-        let number = if member.url == pull.url {
-            format!("[#{}]", member.number)
-        } else {
-            format!("#{}", member.number)
-        };
-        label.push_str(&format!(" ← {number}"));
-    }
-    Some(label)
-}
-
 /// The [MASTER]/[DEV] twin of `pull`: same repo, same title under the other
 /// prefix.
 pub fn twin<'a>(pull: &PullRequest, pulls: &'a [PullRequest]) -> Option<&'a PullRequest> {
@@ -102,6 +84,7 @@ mod tests {
             review: Review::Approved,
             approvers: Vec::new(),
             requested_reviewers: Vec::new(),
+            requested_teams: Vec::new(),
             mergeable: Mergeable::Clean,
             comments: 0,
             threads: Vec::new(),
@@ -119,12 +102,16 @@ mod tests {
             pull(9, "alone", "master", "fix/z"),
         ];
 
-        let label = chain_label(&pulls[2], &pulls);
-        let alone = chain_label(&pulls[3], &pulls);
+        let numbers = |pull: &PullRequest| {
+            chain(pull, &pulls)
+                .iter()
+                .map(|member| member.number)
+                .collect::<Vec<_>>()
+        };
 
-        assert_eq!(label.as_deref(), Some("master ← #1 ← [#2] ← #3"));
+        assert_eq!(numbers(&pulls[2]), [1, 2, 3]);
         assert_eq!(below(&pulls[0], &pulls).map(|p| p.number), Some(2));
-        assert_eq!(alone, None);
+        assert_eq!(numbers(&pulls[3]), [9]);
     }
 
     #[test]

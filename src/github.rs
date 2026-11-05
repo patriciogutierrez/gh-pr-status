@@ -109,8 +109,10 @@ pub struct PullRequest {
     pub review: Review,
     /// Logins whose latest review approves the PR.
     pub approvers: Vec<String>,
-    /// Users and teams asked for a review who have not given it yet.
+    /// People asked for a review who have not given it yet.
     pub requested_reviewers: Vec<String>,
+    /// Teams asked for a review, usually by CODEOWNERS, that have not given it.
+    pub requested_teams: Vec<String>,
     pub mergeable: Mergeable,
     pub comments: u64,
     /// Review threads nobody has resolved, on code that is still current.
@@ -269,7 +271,8 @@ fn parse_pull(node: &Value) -> Option<PullRequest> {
         failing_checks: failing_checks(rollup),
         review: parse_review(node),
         approvers: approvers(node),
-        requested_reviewers: requested_reviewers(node),
+        requested_reviewers: requested(node, "login"),
+        requested_teams: requested(node, "name"),
         mergeable: match node["mergeable"].as_str() {
             Some("MERGEABLE") => Mergeable::Clean,
             Some("CONFLICTING") => Mergeable::Conflicting,
@@ -408,17 +411,16 @@ fn approvers(node: &Value) -> Vec<String> {
         .collect()
 }
 
-fn requested_reviewers(node: &Value) -> Vec<String> {
+/// The reviewers asked for that carry `key`: `login` for people, `name` for
+/// teams.
+fn requested(node: &Value, key: &str) -> Vec<String> {
     let Some(requests) = node["reviewRequests"]["nodes"].as_array() else {
         return Vec::new();
     };
 
     requests
         .iter()
-        .filter_map(|request| {
-            let reviewer = &request["requestedReviewer"];
-            reviewer["login"].as_str().or(reviewer["name"].as_str())
-        })
+        .filter_map(|request| request["requestedReviewer"][key].as_str())
         .map(str::to_string)
         .collect()
 }
@@ -645,7 +647,8 @@ mod tests {
 
         let pull = parse_pull(&node(json!({ "reviewRequests": requests }))).unwrap();
 
-        assert_eq!(pull.requested_reviewers, ["carla", "payments-cl"]);
+        assert_eq!(pull.requested_reviewers, ["carla"]);
+        assert_eq!(pull.requested_teams, ["payments-cl"]);
     }
 
     #[test]

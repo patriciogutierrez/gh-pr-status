@@ -1107,6 +1107,16 @@ impl Root {
                 cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
             },
         )];
+        if let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) {
+            let branch = pull.head.clone();
+            items.push(ui::menu_item(
+                "menu-copy-branch",
+                "Copiar rama",
+                move |_event, _window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(branch.clone()));
+                },
+            ));
+        }
         if let Some(link) = self.request_link(url) {
             items.push(ui::menu_item(
                 "menu-request",
@@ -1709,14 +1719,13 @@ impl Root {
                 .filter(move |pull| Group::of(pull, now) == group)
         };
 
+        let stacks = self.stacks(pulls);
         let sections: Vec<_> = Group::ALL
             .into_iter()
             .filter_map(|group| {
-                let rows: Vec<_> = in_group(group)
-                    .map(|pull| self.row(pull, group.color(), cx).into_any_element())
-                    .collect();
+                let (count, rows) = self.with_stacks(in_group(group), &stacks, false, cx);
                 (!rows.is_empty())
-                    .then(|| section(group.title(), group.color(), rows).into_any_element())
+                    .then(|| section(group.title(), group.color(), count, rows).into_any_element())
             })
             .collect();
 
@@ -1958,16 +1967,13 @@ impl Root {
             Some(folder) if folder.parent.is_some() => folder.name.clone(),
             _ => "Sin subgrupo".to_string(),
         };
-        let mut cards: Vec<_> = Group::ALL
-            .into_iter()
-            .flat_map(|group| {
-                open.iter()
-                    .copied()
-                    .filter(move |pull| Group::of(pull, now) == group)
-                    .map(move |pull| (group, pull))
-            })
-            .map(|(group, pull)| self.card(pull, group.color(), cx).into_any_element())
-            .collect();
+        let stacks = self.stacks(open);
+        let ordered = Group::ALL.into_iter().flat_map(|group| {
+            open.iter()
+                .copied()
+                .filter(move |pull| Group::of(pull, now) == group)
+        });
+        let (_, mut cards) = self.with_stacks(ordered, &stacks, true, cx);
         if cards.is_empty() {
             cards.push(
                 div()
@@ -2084,7 +2090,7 @@ impl Root {
                         } else {
                             theme::SUBTEXT
                         };
-                        section(&merged::day_label(day, today), color, rows)
+                        section(&merged::day_label(day, today), color, rows.len(), rows)
                     }))
                     .into_any_element()
             })
@@ -2163,14 +2169,103 @@ impl Root {
         })
     }
 
-    /// One PR in the list.
-    fn row(&self, pull: &PullRequest, color: u32, cx: &mut Context<Self>) -> impl IntoElement {
-        self.pull_block(pull, color, false, cx)
+    /// The stacks among `pulls` with two or more of them, each bottom first:
+    /// the PR on the long-lived branch, then the ones on top of it.
+    fn stacks<'a>(&'a self, pulls: &[&'a PullRequest]) -> Vec<Vec<&'a PullRequest>> {
+        let all = self.mine.pulls();
+        let shown = |url: &str| pulls.iter().any(|pull| pull.url == url);
+        pulls
+            .iter()
+            .filter(|pull| stack::below(pull, all).is_none())
+            .map(|pull| {
+                stack::chain(pull, all)
+                    .into_iter()
+                    .filter(|member| shown(&member.url))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|chain| chain.len() > 1)
+            .collect()
     }
 
-    /// One PR on the board, packed for a narrow column.
-    fn card(&self, pull: &PullRequest, color: u32, cx: &mut Context<Self>) -> impl IntoElement {
-        self.pull_block(pull, color, true, cx)
+    /// `pulls` as rows or cards, a stack drawn whole where its bottom PR
+    /// falls and its other PRs skipped where they would; with how many PRs
+    /// that is.
+    fn with_stacks<'a>(
+        &self,
+        pulls: impl Iterator<Item = &'a PullRequest>,
+        stacks: &[Vec<&PullRequest>],
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> (usize, Vec<gpui::AnyElement>) {
+        let now = now();
+        let stacked = |url: &str| {
+            stacks
+                .iter()
+                .any(|chain| chain[1..].iter().any(|pull| pull.url == url))
+        };
+        let mut count = 0;
+        let mut rows = Vec::new();
+        for pull in pulls.filter(|pull| !stacked(&pull.url)) {
+            match stacks.iter().find(|chain| chain[0].url == pull.url) {
+                Some(chain) => {
+                    count += chain.len();
+                    rows.push(self.stack_unit(chain, compact, cx).into_any_element());
+                }
+                None => {
+                    count += 1;
+                    let color = Group::of(pull, now).color();
+                    rows.push(
+                        self.pull_block(pull, color, compact, None, cx)
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        (count, rows)
+    }
+
+    /// A stack, bottom first under the branch it merges into, its PRs joined
+    /// by a rail with an arrow at each pointing at the one it merges into.
+    fn stack_unit(
+        &self,
+        chain: &[&PullRequest],
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let now = now();
+        let base = chain[0];
+        let last = chain.len() - 1;
+
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .text_xs()
+                    .text_color(rgb(theme::MUTED))
+                    .child(
+                        div()
+                            .px_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(theme::SURFACE_HOVER))
+                            .text_color(rgb(theme::SUBTEXT))
+                            .child(base.base.clone()),
+                    )
+                    .child(format!("{} · stack de {}", base.repo_name(), chain.len())),
+            )
+            .children(chain.iter().enumerate().map(|(index, pull)| {
+                let color = Group::of(pull, now).color();
+                let rail = Rail {
+                    last: index == last,
+                };
+                self.pull_block(pull, color, compact, Some(rail), cx)
+                    .into_any_element()
+            }))
     }
 
     /// A PR: its title behind the state's dot, its next action as the one
@@ -2183,6 +2278,7 @@ impl Root {
         pull: &PullRequest,
         color: u32,
         compact: bool,
+        rail: Option<Rail>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let now = now();
@@ -2213,6 +2309,7 @@ impl Root {
             .py_2()
             .rounded_lg()
             .hover(|style| style.bg(rgb(theme::ROW_HOVER)))
+            .when_some(rail, |this, rail| this.relative().children(rail.pieces()))
             .child(
                 div()
                     .flex()
@@ -2287,11 +2384,7 @@ impl Root {
                             .flex_1()
                             .min_w(px(0.))
                             .when(compact, |this| this.w_full())
-                            .child(div().flex_1().min_w(px(0.)).truncate().child(meta(
-                                pull,
-                                compact,
-                                self.review_asked.get(&pull.url),
-                            )))
+                            .child(div().flex_1().min_w(px(0.)).truncate().child(meta(pull)))
                             .child(
                                 div()
                                     .flex_shrink_0()
@@ -2502,7 +2595,12 @@ fn list(id: &'static str) -> gpui::Stateful<gpui::Div> {
         .overflow_y_scroll()
 }
 
-fn section(title: &str, color: u32, rows: Vec<gpui::AnyElement>) -> impl IntoElement + use<> {
+fn section(
+    title: &str,
+    color: u32,
+    count: usize,
+    rows: Vec<gpui::AnyElement>,
+) -> impl IntoElement + use<> {
     div()
         .flex()
         .flex_col()
@@ -2515,13 +2613,58 @@ fn section(title: &str, color: u32, rows: Vec<gpui::AnyElement>) -> impl IntoEle
                 .text_xs()
                 .text_color(rgb(color))
                 .child(title.to_uppercase())
-                .child(
-                    div()
-                        .text_color(rgb(theme::MUTED))
-                        .child(rows.len().to_string()),
-                ),
+                .child(div().text_color(rgb(theme::MUTED)).child(count.to_string())),
         )
         .children(rows)
+}
+
+/// Where a PR sits in a drawn stack: the rail runs down from its dot to the
+/// next one unless it is the last.
+#[derive(Copy, Clone)]
+struct Rail {
+    last: bool,
+}
+
+impl Rail {
+    /// Where the dot's middle is, from the top of the PR's block: its top
+    /// padding and half its title line.
+    const DOT_MIDDLE: f32 = 8. + 11.;
+    /// The rail's left edge, under the dot's middle.
+    const LEFT: f32 = 12. + DOT_SLOT / 2. - 1.;
+
+    /// The arrow above the dot, pointing at what it merges into, and the
+    /// line from the dot to the next PR's arrow.
+    fn pieces(self) -> Vec<gpui::AnyElement> {
+        let top = Self::DOT_MIDDLE - DOT_SLOT / 2.;
+        let mut pieces = vec![
+            div()
+                .absolute()
+                .top(px(-3.))
+                .left(px(Self::LEFT - 4.))
+                .w(px(10.))
+                .h(px(top + 3.))
+                .flex()
+                .justify_center()
+                .text_size(px(10.))
+                .line_height(px(10.))
+                .text_color(rgb(theme::MUTED))
+                .child("▲")
+                .into_any_element(),
+        ];
+        if !self.last {
+            pieces.push(
+                div()
+                    .absolute()
+                    .top(px(Self::DOT_MIDDLE + DOT_SLOT / 2.))
+                    .bottom(px(0.))
+                    .left(px(Self::LEFT))
+                    .w(px(2.))
+                    .bg(rgb(theme::SURFACE_ACTIVE))
+                    .into_any_element(),
+            );
+        }
+        pieces
+    }
 }
 
 /// A PR's state, as a dot in its section's color. A teal ring around it says
@@ -2539,34 +2682,30 @@ fn state_dot(color: u32, asked: bool) -> impl IntoElement {
         .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(rgb(color)))
 }
 
-/// The rest of a PR's state after its action, in one muted line: repo and
-/// number, CI, review, conflicts, draft, when a review was asked for through
-/// Slack (`asked`) until it is approved, comments and, unless `compact`, the
-/// branches.
-fn meta(pull: &PullRequest, compact: bool, asked: Option<&review::Asked>) -> String {
+/// What else matters about a PR after its action, in one muted line: repo and
+/// number, whether it is a draft, CI still running, approval and comments.
+/// A failing CI, conflicts and who to wait for are the action's to say; the
+/// branch is in the menu.
+fn meta(pull: &PullRequest) -> String {
     let mut parts = vec![format!("{} #{}", pull.repo_name(), pull.number)];
-    parts.extend(status::badges(pull).into_iter().map(|badge| badge.label));
-    if let Some(asked) = asked.filter(|_| pull.review != Review::Approved) {
-        parts.push(format!("review pedido {}", status::ago(now() - asked.at)));
-        match asked.replies {
-            0 => {}
-            1 => parts.push("1 respuesta en Slack".to_string()),
-            n => parts.push(format!("{n} respuestas en Slack")),
-        }
+    if pull.draft {
+        parts.push("borrador".to_string());
+    }
+    if pull.checks == github::Checks::Pending {
+        parts.push("CI corriendo".to_string());
+    }
+    if pull.review == Review::Approved {
+        parts.push("aprobado".to_string());
     }
     match pull.comments {
         0 => {}
         1 => parts.push("1 comentario".to_string()),
         n => parts.push(format!("{n} comentarios")),
     }
-    // Last, since it is the longest and the first to be cut.
-    if !compact {
-        parts.push(format!("{} → {}", pull.head, pull.base));
-    }
     parts.join(" · ")
 }
 
-/// The stack the PR is in and its [MASTER]/[DEV] twin, when it has them.
+/// The PR's [MASTER]/[DEV] twin, when it has one.
 fn relations(pull: &PullRequest, pulls: &[PullRequest]) -> Vec<gpui::AnyElement> {
     let line = |text: String| {
         div()
@@ -2578,9 +2717,6 @@ fn relations(pull: &PullRequest, pulls: &[PullRequest]) -> Vec<gpui::AnyElement>
             .into_any_element()
     };
     let mut lines = Vec::new();
-    if let Some(chain) = stack::chain_label(pull, pulls) {
-        lines.push(line(format!("Stack: {chain}")));
-    }
     if let Some(twin) = stack::twin(pull, pulls) {
         let prefix = stack::split_prefix(&twin.title).map_or("", |(prefix, _)| prefix);
         let state: Vec<_> = status::badges(twin)
