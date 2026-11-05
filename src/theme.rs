@@ -15,3 +15,5 @@ pub const ACCENT: u32 = 0xcba6f7;
 pub const GREEN: u32 = 0xa6e3a1;
 pub const RED: u32 = 0xf38ba8;
 pub const YELLOW: u32 = 0xf9e2af;
+/// Slack's mark: a review asked for there.
+pub const TEAL: u32 = 0x94e2d5;

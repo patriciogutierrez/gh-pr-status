@@ -192,7 +192,8 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   medium, low), canal, comentario, y el
   link del PR ya puesto. «Enviar a Slack» (o enter) hace un `POST` al webhook del workflow de
   review del equipo, que publica el pedido con su botón «aprobar»; tú vas como requester. La
-  fila dice «review pedido hace N» hasta que el PR quede aprobado, y el menú deja de ofrecer
+  fila dice «review pedido hace N» y su punto de estado lleva un anillo teal hasta que el PR
+  quede aprobado, y el menú deja de ofrecer
   el pedido; se recuerda en `reviews.sqlite`, junto a los otros archivos locales. Con
   `GH_PR_STATUS_SLACK_TOKEN` (un token de usuario con `channels:history` y `groups:history`),
   la app busca unos segundos después el mensaje que publicó el workflow, y desde ahí «Ver

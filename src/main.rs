@@ -76,6 +76,12 @@ const ENTRY_CHROME: f32 = 2. * 8. + 2. + 8. + COUNT_WIDTH;
 const FOLD_WIDTH: f32 = 12. + 8.;
 /// How far a subgroup sits in from its group, past the group's arrow.
 const SUBGROUP_INDENT: f32 = FOLD_WIDTH + 6.;
+/// How far a PR's lines sit in from its row, to start under its title: the
+/// state dot's slot and the gap after it.
+const TITLE_INDENT: f32 = DOT_SLOT + 8.;
+/// The room the state dot takes, wide enough for the ring around it.
+const DOT_SLOT: f32 = 16.;
+
 /// How wide each column of a group's board is.
 const BOARD_COLUMN: f32 = 300.;
 /// The board's scrollbar: its height and the room kept under the columns.
@@ -671,7 +677,7 @@ impl Root {
         let mut lines = vec![
             div()
                 .id(SharedString::from(format!("threads-{}", pull.url)))
-                .ml(px(16.))
+                .ml(px(TITLE_INDENT))
                 .px_1()
                 .rounded_md()
                 .text_xs()
@@ -700,7 +706,7 @@ impl Root {
             lines.push(
                 div()
                     .id(SharedString::from(format!("thread-{index}-{}", pull.url)))
-                    .ml(px(16.))
+                    .ml(px(TITLE_INDENT))
                     .flex()
                     .flex_col()
                     .gap_0p5()
@@ -2212,14 +2218,11 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .w(px(8.))
-                            .h(px(8.))
-                            .flex_shrink_0()
-                            .rounded_full()
-                            .bg(rgb(color)),
-                    )
+                    .child(state_dot(
+                        color,
+                        pull.review != Review::Approved
+                            && self.review_asked.contains_key(&pull.url),
+                    ))
                     .child(
                         div()
                             .id(SharedString::from(format!("open-{}", pull.url)))
@@ -2267,7 +2270,7 @@ impl Root {
                     .when(compact, |this| this.flex_col().items_start())
                     .when(!compact, |this| this.items_center())
                     .gap_1()
-                    .pl(px(16.))
+                    .pl(px(TITLE_INDENT))
                     .text_xs()
                     .text_color(rgb(theme::MUTED))
                     // In a column, a lone pill measures as zero wide; a row
@@ -2310,7 +2313,7 @@ impl Root {
                 |this, error| {
                     this.child(
                         div()
-                            .pl(px(16.))
+                            .pl(px(TITLE_INDENT))
                             .text_xs()
                             .text_color(rgb(theme::RED))
                             .child(format!("No se pudo enviar el deploy: {error}")),
@@ -2320,11 +2323,11 @@ impl Root {
             .when_some(pull.pipeline.as_ref(), |this, run| {
                 this.child(
                     div()
-                        .pl(px(16.))
+                        .pl(px(TITLE_INDENT))
                         .child(self.pipeline_bar(pull, run, expanded, cx)),
                 )
                 .when(expanded, |this| {
-                    this.child(div().pl(px(16.)).child(steps(pull, run)))
+                    this.child(div().pl(px(TITLE_INDENT)).child(steps(pull, run)))
                 })
             })
     }
@@ -2525,6 +2528,21 @@ fn section(title: &str, color: u32, rows: Vec<gpui::AnyElement>) -> impl IntoEle
         .children(rows)
 }
 
+/// A PR's state, as a dot in its section's color. A teal ring around it says
+/// a review was asked for in Slack and is still waiting.
+fn state_dot(color: u32, asked: bool) -> impl IntoElement {
+    div()
+        .w(px(DOT_SLOT))
+        .h(px(DOT_SLOT))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .when(asked, |this| this.border_2().border_color(rgb(theme::TEAL)))
+        .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(rgb(color)))
+}
+
 /// The rest of a PR's state after its action, in one muted line: repo and
 /// number, CI, review, conflicts, draft, when a review was asked for through
 /// Slack (`asked`) until it is approved, comments and, unless `compact`, the
@@ -2556,7 +2574,7 @@ fn meta(pull: &PullRequest, compact: bool, asked: Option<&review::Asked>) -> Str
 fn relations(pull: &PullRequest, pulls: &[PullRequest]) -> Vec<gpui::AnyElement> {
     let line = |text: String| {
         div()
-            .pl(px(16.))
+            .pl(px(TITLE_INDENT))
             .text_xs()
             .text_color(rgb(theme::MUTED))
             .truncate()
