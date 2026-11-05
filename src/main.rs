@@ -1818,12 +1818,20 @@ impl Root {
                             .track_scroll(&self.board_scroll)
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(|this, event: &MouseDownEvent, _window, _cx| {
+                                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                                     let scrolled = -f32::from(this.board_scroll.offset().x);
                                     this.pan_from = Some((f32::from(event.position.x), scrolled));
+                                    cx.notify();
                                 }),
                             )
                             .on_drag(PanBoard, |_, _, _, cx| cx.new(|_| PanBoard))
+                            // An open hand says the board can be dragged; it
+                            // closes while the mouse is down.
+                            .cursor(if self.pan_from.is_some() {
+                                gpui::CursorStyle::ClosedHand
+                            } else {
+                                gpui::CursorStyle::OpenHand
+                            })
                             .children(columns),
                     )
                     .child(self.board_scrollbar()),
