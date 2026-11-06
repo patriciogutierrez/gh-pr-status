@@ -80,7 +80,8 @@ scripts/bundle.sh --install   # compila en release y deja "PR Manager.app" en ~/
 minutos.
 
 Una app abierta desde Finder **no hereda las variables de tu shell**, así que
-`scripts/bundle.sh` copia las `GH_PR_STATUS_*` que estén definidas al empaquetar dentro del
+`scripts/bundle.sh` copia las `GH_PR_STATUS_*` que estén definidas al empaquetar (en el shell, o
+en el `.env` de la raíz del repo si existe, que lee solo) dentro del
 `Info.plist` de la app (`LSEnvironment`). Si cambias alguna, vuelve a correr
 `scripts/bundle.sh --install` y reinicia la app.
 
