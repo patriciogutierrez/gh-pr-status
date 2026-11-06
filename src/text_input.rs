@@ -58,11 +58,17 @@ pub struct TextInput {
 
 impl TextInput {
     pub fn new(placeholder: &'static str, cx: &mut Context<Self>) -> Self {
+        Self::with_text(placeholder, String::new(), cx)
+    }
+
+    /// A field that starts with `text`, the cursor at its end.
+    pub fn with_text(placeholder: &'static str, text: String, cx: &mut Context<Self>) -> Self {
+        let end = text.len();
         Self {
             focus_handle: cx.focus_handle(),
-            content: "".into(),
+            content: text.into(),
             placeholder: placeholder.into(),
-            selected_range: 0..0,
+            selected_range: end..end,
             selection_reversed: false,
             marked_range: None,
             last_layout: None,
@@ -183,7 +189,13 @@ impl TextInput {
         }
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle);
         self.is_selecting = true;
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);

@@ -21,6 +21,8 @@ mod orca;
 mod pipeline;
 mod review;
 mod review_view;
+mod settings;
+mod settings_view;
 mod slack;
 mod stack;
 mod status;
@@ -30,8 +32,6 @@ mod tool;
 mod ui;
 
 use std::collections::{HashMap, HashSet};
-use std::env;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
@@ -45,7 +45,7 @@ use github::{PullRequest, Review, Snapshot};
 use pipeline::{Pipeline, State};
 use status::Group;
 
-actions!(app, [Refresh, ShowMine, ShowMerged, Quit]);
+actions!(app, [Refresh, ShowMine, ShowMerged, OpenSettings, Quit]);
 
 /// How often the lists reload without being asked. Each reload is one GraphQL
 /// call per tab, one or two points of GitHub's 5,000-point hourly budget.
@@ -94,28 +94,21 @@ const MARQUEE_WAIT: f32 = 1.;
 const MARQUEE_HOLD: f32 = 2.;
 const MARQUEE_RETURN: f32 = 0.4;
 
-/// Where the "Slack" button next to each PR goes: the channel in
-/// `GH_PR_STATUS_SLACK_CHANNEL`, straight in the Slack app when
-/// `GH_PR_STATUS_SLACK_TEAM` names the workspace, otherwise through slack.com's
-/// redirect. Workflow links only start from inside Slack, so the button opens
-/// the channel and copies the PR link for the workflow's form. Without a
-/// channel, there is no button.
-fn slack_channel() -> Option<&'static str> {
-    static LINK: OnceLock<Option<String>> = OnceLock::new();
-    LINK.get_or_init(|| {
-        let var = |name: &str| {
-            env::var(name)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        };
-        let channel = var("GH_PR_STATUS_SLACK_CHANNEL")?;
-        Some(match var("GH_PR_STATUS_SLACK_TEAM") {
-            Some(team) => format!("slack://channel?team={team}&id={channel}"),
-            None => format!("https://slack.com/app_redirect?channel={channel}"),
-        })
-    })
-    .as_deref()
+/// Where the "Slack" button next to each PR goes: the deploys channel,
+/// straight in the Slack app when the workspace is set, otherwise through
+/// slack.com's redirect. Workflow links only start from inside Slack, so the
+/// button opens the channel and copies the PR link for the workflow's form.
+/// Without a channel, there is no button.
+fn slack_channel() -> Option<String> {
+    settings::get(settings::SLACK_CHANNEL).map(|channel| channel_link(&channel))
+}
+
+/// `channel` in the Slack app when the workspace is set, else on slack.com.
+fn channel_link(channel: &str) -> String {
+    match settings::get(settings::SLACK_TEAM) {
+        Some(team) => format!("slack://channel?team={team}&id={channel}"),
+        None => format!("https://slack.com/app_redirect?channel={channel}"),
+    }
 }
 
 /// Where a PR's `/deploy` comment is. A PR missing from the map has none going.
@@ -626,6 +619,20 @@ impl Root {
     }
 
     /// Opens the review form for the PR in its own window.
+    /// Opens the settings window; once saved, the lists reload so pipelines
+    /// and the review form follow the new settings.
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        let root = cx.entity().downgrade();
+        self.folders_error = settings_view::open(
+            move |cx| {
+                root.update(cx, |this, cx| this.refresh(&Refresh, cx)).ok();
+            },
+            cx,
+        )
+        .err();
+        cx.notify();
+    }
+
     fn open_review(&mut self, url: &str, cx: &mut Context<Self>) {
         let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) else {
             return;
@@ -1239,7 +1246,7 @@ impl Root {
                     "Solicitar review",
                     move |_event, _window, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-                        cx.open_url(channel);
+                        cx.open_url(&channel);
                     },
                 ));
             }
@@ -1817,6 +1824,12 @@ impl Root {
                     ))
                 },
             )
+            .child(ui::button(
+                "settings",
+                "Ajustes",
+                true,
+                cx.listener(|this, _event, _window, cx| this.open_settings(cx)),
+            ))
             .child(ui::button(
                 "refresh",
                 if self.refreshing() {
@@ -3171,13 +3184,7 @@ impl Root {
         if let Some(permalink) = &asked.permalink {
             return Some(permalink.clone());
         }
-        let channel = &asked.channel;
-        Some(match env::var("GH_PR_STATUS_SLACK_TEAM") {
-            Ok(team) if !team.trim().is_empty() => {
-                format!("slack://channel?team={}&id={channel}", team.trim())
-            }
-            _ => format!("https://slack.com/app_redirect?channel={channel}"),
-        })
+        Some(channel_link(&asked.channel))
     }
 }
 
@@ -3195,6 +3202,7 @@ impl Render for Root {
             .on_action(cx.listener(|this, action, _window, cx| this.refresh(action, cx)))
             .on_action(cx.listener(|this, _: &ShowMine, _window, cx| this.show(Tab::Mine, cx)))
             .on_action(cx.listener(|this, _: &ShowMerged, _window, cx| this.show(Tab::Merged, cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, _window, cx| this.open_settings(cx)))
             .on_key_down(cx.listener(|this, event, _window, cx| this.edit_key(event, cx)))
             // Letting go of the scrollbar's thumb, anywhere.
             .on_mouse_up(
@@ -3242,12 +3250,16 @@ impl Render for Root {
             )
             .when_some(self.menu.as_ref(), |this, menu| this.child(self.menu(menu, cx)))
             .child(div().text_xs().text_color(rgb(theme::MUTED)).child(
-                "clic en el título abre el PR · ⋯ o clic derecho: acciones · arrástralo a un grupo · cmd-r actualiza · cmd-1/2 pestañas",
+                "clic en el título abre el PR · ⋯ o clic derecho: acciones · arrástralo a un grupo · cmd-r actualiza · cmd-1/2 pestañas · cmd-, ajustes",
             ))
     }
 }
 
 fn main() {
+    // Before any window, so the first render already knows the settings.
+    if let Err(error) = settings::load() {
+        eprintln!("{error}");
+    }
     Application::new().run(|cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([
@@ -3255,6 +3267,7 @@ fn main() {
             KeyBinding::new("cmd-r", Refresh, Some("Root")),
             KeyBinding::new("cmd-1", ShowMine, Some("Root")),
             KeyBinding::new("cmd-2", ShowMerged, Some("Root")),
+            KeyBinding::new("cmd-,", OpenSettings, Some("Root")),
             // The comment field of the review window.
             KeyBinding::new("enter", text_input::Newline, Some("TextInput")),
             KeyBinding::new("backspace", text_input::Backspace, Some("TextInput")),

@@ -11,15 +11,13 @@
 //! step is tagged with the environment it belongs to, and a run counts as
 //! finished only on that closing heading.
 
-use std::env;
-use std::sync::OnceLock;
-
 use serde_json::Value;
 
 use crate::github::parse_timestamp;
+use crate::settings;
 
-/// Who runs the pipelines and which GCP project is which environment, read
-/// once from the environment. Without a bot, no PR shows a pipeline.
+/// Who runs the pipelines and which GCP project is which environment, from
+/// the app's settings. Without a bot, no PR shows a pipeline.
 #[derive(Clone, Debug, Default)]
 pub struct Settings {
     /// GitHub login of the bot that comments the runs (`GH_PR_STATUS_BOT`).
@@ -29,24 +27,18 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn get() -> &'static Settings {
-        static SETTINGS: OnceLock<Settings> = OnceLock::new();
-        SETTINGS.get_or_init(Settings::from_env)
-    }
-
-    fn from_env() -> Settings {
-        let var = |name: &str| env::var(name).ok().filter(|value| !value.trim().is_empty());
+    pub fn get() -> Settings {
         let projects = [
-            ("GH_PR_STATUS_GCP_PREPROD", Env::PreProd),
-            ("GH_PR_STATUS_GCP_PROD", Env::Prod),
-            ("GH_PR_STATUS_GCP_DEVELOPMENT", Env::Development),
+            (settings::GCP_PREPROD, Env::PreProd),
+            (settings::GCP_PROD, Env::Prod),
+            (settings::GCP_DEVELOPMENT, Env::Development),
         ]
         .into_iter()
-        .filter_map(|(name, env)| var(name).map(|project| (project.trim().to_string(), env)))
+        .filter_map(|(key, env)| settings::get(key).map(|project| (project, env)))
         .collect();
 
         Settings {
-            bot: var("GH_PR_STATUS_BOT").map(|bot| bot.trim().to_string()),
+            bot: settings::get(settings::BOT),
             projects,
         }
     }
