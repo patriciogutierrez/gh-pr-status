@@ -3,18 +3,18 @@
 //! The workflow starts from a webhook: one `POST` with the reviewer, the
 //! requester, the channel, the urgency, a comment and the PR's link, and it
 //! posts the request with its "aprobar" button in the channel. Everything the
-//! form offers comes from `GH_PR_STATUS_*` variables, so the app holds no
-//! names or IDs of its own. When each request was sent is kept in a local
+//! form offers comes from the app's settings, so the code holds no names or
+//! IDs of its own. When each request was sent is kept in a local
 //! SQLite file, so the rows still say so after a restart. The send and the
 //! file block and run on the background executor.
 
 use std::collections::HashMap;
-use std::env;
 use std::process::Command;
 
 use rusqlite::{Connection, params};
 use serde_json::json;
 
+use crate::settings;
 use crate::{db, tool};
 
 /// The urgencies the workflow knows, as its stickers: the word shown, and
@@ -35,7 +35,7 @@ pub struct Choice {
     pub github: Option<String>,
 }
 
-/// What the form needs, read once from the environment.
+/// What the form needs, from the app's settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub webhook: String,
@@ -58,17 +58,11 @@ pub struct Request {
 /// `None` unless the webhook, the requester, a reviewer and a channel are all
 /// configured, since the form needs every one of them.
 pub fn config() -> Option<Config> {
-    let var = |name: &str| {
-        env::var(name)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    };
     let config = Config {
-        webhook: var("GH_PR_STATUS_REVIEW_WEBHOOK")?,
-        requester: var("GH_PR_STATUS_SLACK_USER")?,
-        reviewers: parse_choices(&var("GH_PR_STATUS_REVIEWERS")?),
-        channels: parse_choices(&var("GH_PR_STATUS_REVIEW_CHANNELS")?),
+        webhook: settings::get(settings::REVIEW_WEBHOOK)?,
+        requester: settings::get(settings::SLACK_USER)?,
+        reviewers: parse_choices(&settings::get(settings::REVIEWERS)?),
+        channels: parse_choices(&settings::get(settings::REVIEW_CHANNELS)?),
     };
     (!config.reviewers.is_empty() && !config.channels.is_empty()).then_some(config)
 }

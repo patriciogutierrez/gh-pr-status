@@ -3,11 +3,11 @@
 //! replies under it. Everything here blocks and runs on the background
 //! executor.
 
-use std::env;
 use std::process::Command;
 
 use serde_json::Value;
 
+use crate::settings;
 use crate::tool;
 
 /// How many of the channel's latest messages are searched for the request.
@@ -22,10 +22,7 @@ pub struct Message {
 
 /// The user token, when configured.
 pub fn token() -> Option<String> {
-    env::var("GH_PR_STATUS_SLACK_TOKEN")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    settings::get(settings::SLACK_TOKEN)
 }
 
 /// The latest message in `channel` that mentions `needle` (the PR's URL),

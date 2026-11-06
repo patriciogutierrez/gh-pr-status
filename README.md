@@ -36,8 +36,20 @@ La app **no guarda ni maneja ningún token**: reutiliza la sesión de `gh`. Bast
 ### 2. Configurar (opcional)
 
 Sin configuración la app ya muestra tus PRs, sus checks, reviews y conflictos, y avisa
-cuando te aprueban uno. Las variables siguientes solo activan el seguimiento del **pipeline
-de deploy** (ver [El pipeline](#el-pipeline)):
+cuando te aprueban uno. El resto se configura en la ventana **Ajustes** (botón «Ajustes» o
+cmd-,): el seguimiento del **pipeline de deploy** (ver [El pipeline](#el-pipeline)), el
+formulario de review de Slack y la carpeta del agente. Se guardan en este Mac, en
+`~/Library/Application Support/PR Manager/settings.sqlite`, salvo el webhook y el token de
+Slack, que van al **Llavero de macOS** (servicio `com.patriciogutierrez.pr-manager`). La
+ventana nunca muestra esos dos: dice si hay uno guardado, y lo que escribas lo reemplaza.
+
+Cada ajuste lleva el nombre de la variable de entorno que lo configuraba antes. Si al abrir la
+app una variable está definida y su ajuste no está guardado, la app la guarda; así se pasa
+de un `.env` a Ajustes sin copiar nada a mano:
+
+```sh
+set -a; source .env; set +a; cargo run --release   # una vez; después basta con Ajustes
+```
 
 | Variable | Qué es | Ejemplo |
 | --- | --- | --- |
@@ -57,17 +69,6 @@ de deploy** (ver [El pipeline](#el-pipeline)):
 Los proyectos de GCP solo sirven para saber en qué ambiente falló un deploy cuando el
 mensaje de error no lo dice de otra forma; puedes omitirlos.
 
-Ponlas en tu `~/.zshrc` (o expórtalas antes de compilar):
-
-```sh
-export GH_PR_STATUS_BOT=my-deploy-bot
-export GH_PR_STATUS_GCP_PREPROD=acme-staging
-export GH_PR_STATUS_GCP_PROD=acme-prod
-export GH_PR_STATUS_GCP_DEVELOPMENT=acme-dev
-export GH_PR_STATUS_SLACK_CHANNEL=C0123456789
-export GH_PR_STATUS_SLACK_TEAM=T0123456789
-```
-
 ### 3. Instalar como app de macOS
 
 ```sh
@@ -79,11 +80,8 @@ scripts/bundle.sh --install   # compila en release y deja "PR Manager.app" en ~/
 Ábrela desde Spotlight, Finder o el Dock. La primera compilación de GPUI demora varios
 minutos.
 
-Una app abierta desde Finder **no hereda las variables de tu shell**, así que
-`scripts/bundle.sh` copia las `GH_PR_STATUS_*` que estén definidas al empaquetar (en el shell, o
-en el `.env` de la raíz del repo si existe, que lee solo) dentro del
-`Info.plist` de la app (`LSEnvironment`). Si cambias alguna, vuelve a correr
-`scripts/bundle.sh --install` y reinicia la app.
+Los ajustes no van dentro de la app: reinstalarla no los toca, y cambiarlos no pide
+recompilar.
 
 El script también firma la app ad-hoc, suficiente para una app compilada y usada en el
 mismo Mac. Con `--install` la app se mueve a `~/Applications`, así Spotlight encuentra una sola
@@ -291,7 +289,7 @@ exige reviews; si no, la app usa la última review de cada revisor.
 | Síntoma | Causa |
 | --- | --- |
 | "gh: command not found" o error de autenticación | Falta `brew install gh` o `gh auth login`. La app busca `gh` en el `PATH` y en `/opt/homebrew/bin` y `/usr/local/bin` |
-| No aparecen pipelines | `GH_PR_STATUS_BOT` no está definida, o no lo estaba al correr `scripts/bundle.sh` |
+| No aparecen pipelines | Falta el «Bot de pipelines» en Ajustes |
 | El clic en la notificación abre Script Editor | Falta `brew install terminal-notifier` |
 | Error de compilación sobre `metal` | Falta Xcode completo o `xcode-select` apunta a Command Line Tools |
 

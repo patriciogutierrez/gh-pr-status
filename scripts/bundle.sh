@@ -6,8 +6,8 @@
 #   scripts/bundle.sh --install  # moves it to ~/Applications instead, so
 #                                # Spotlight finds a single copy
 #
-# An app opened from Finder does not see the shell's variables, so the
-# GH_PR_STATUS_* ones set while bundling are written into Info.plist.
+# The app's settings are not part of the bundle: it keeps them in its own
+# SQLite file and the Keychain, edited from its Ajustes window.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -25,32 +25,6 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$TARGET_DIR/release/$BINARY" "$APP/Contents/MacOS/$BINARY"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
-
-xml_escape() {
-  local text="$1"
-  text="${text//&/&amp;}"
-  text="${text//</&lt;}"
-  text="${text//>/&gt;}"
-  printf '%s' "$text"
-}
-
-# The settings come from the shell, or from .env when there is one, so a
-# build without it sourced doesn't ship an app missing them.
-if [[ -f .env ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
-fi
-
-ENVIRONMENT=""
-for name in GH_PR_STATUS_BOT GH_PR_STATUS_GCP_PREPROD GH_PR_STATUS_GCP_PROD GH_PR_STATUS_GCP_DEVELOPMENT GH_PR_STATUS_SLACK_CHANNEL GH_PR_STATUS_SLACK_TEAM GH_PR_STATUS_CODE_DIR GH_PR_STATUS_REVIEW_WEBHOOK GH_PR_STATUS_SLACK_USER GH_PR_STATUS_REVIEWERS GH_PR_STATUS_REVIEW_CHANNELS GH_PR_STATUS_SLACK_TOKEN; do
-  if [[ -n "${!name:-}" ]]; then
-    ENVIRONMENT+="    <key>$name</key>
-    <string>$(xml_escape "${!name}")</string>
-"
-  fi
-done
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -77,9 +51,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>11.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
-  <key>LSEnvironment</key>
-  <dict>
-$ENVIRONMENT  </dict>
 </dict>
 </plist>
 PLIST
