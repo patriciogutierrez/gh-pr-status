@@ -34,6 +34,15 @@ xml_escape() {
   printf '%s' "$text"
 }
 
+# The settings come from the shell, or from .env when there is one, so a
+# build without it sourced doesn't ship an app missing them.
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 ENVIRONMENT=""
 for name in GH_PR_STATUS_BOT GH_PR_STATUS_GCP_PREPROD GH_PR_STATUS_GCP_PROD GH_PR_STATUS_GCP_DEVELOPMENT GH_PR_STATUS_SLACK_CHANNEL GH_PR_STATUS_SLACK_TEAM GH_PR_STATUS_CODE_DIR GH_PR_STATUS_REVIEW_WEBHOOK GH_PR_STATUS_SLACK_USER GH_PR_STATUS_REVIEWERS GH_PR_STATUS_REVIEW_CHANNELS GH_PR_STATUS_SLACK_TOKEN; do
   if [[ -n "${!name:-}" ]]; then
