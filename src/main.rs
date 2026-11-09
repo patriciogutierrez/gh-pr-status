@@ -2254,6 +2254,7 @@ impl Root {
             )
             .children(chain.iter().enumerate().map(|(index, pull)| {
                 let rail = Rail {
+                    first: index == 0,
                     last: index == last,
                 };
                 self.pull_block(pull, compact, Some(rail), cx)
@@ -2610,10 +2611,12 @@ fn section(
         .children(rows)
 }
 
-/// Where a PR sits in a drawn stack: the rail runs down from its dot to the
-/// next one unless it is the last.
+/// Where a PR sits in a drawn stack: a line runs up from each dot to what
+/// it merges into, with the arrow at that end, under the branch for the
+/// first PR and under the previous PR's dot for the rest.
 #[derive(Copy, Clone)]
 struct Rail {
+    first: bool,
     last: bool,
 }
 
@@ -2623,39 +2626,59 @@ impl Rail {
     const DOT_MIDDLE: f32 = 8. + 11.;
     /// The rail's left edge, under the dot's middle.
     const LEFT: f32 = 12. + DOT_SLOT / 2. - 1.;
+    /// The arrow's height; the line starts a bit inside it, under its tip.
+    const ARROW: f32 = 10.;
 
-    /// The arrow above the dot, pointing at what it merges into, and the
-    /// line from the dot to the next PR's arrow.
+    /// The line into this PR's dot from above, with the arrow at the
+    /// branch for the first, and the arrow under this dot that the line
+    /// from the next PR ends at.
     fn pieces(self) -> Vec<gpui::AnyElement> {
-        let top = Self::DOT_MIDDLE - DOT_SLOT / 2.;
-        let mut pieces = vec![
-            div()
-                .absolute()
-                .top(px(-3.))
-                .left(px(Self::LEFT - 4.))
-                .w(px(10.))
-                .h(px(top + 3.))
-                .flex()
-                .justify_center()
-                .text_size(px(10.))
-                .line_height(px(10.))
-                .text_color(rgb(theme::MUTED))
-                .child("▲")
-                .into_any_element(),
-        ];
+        let dot_top = Self::DOT_MIDDLE - DOT_SLOT / 2.;
+        let dot_bottom = Self::DOT_MIDDLE + DOT_SLOT / 2.;
+        let mut pieces = Vec::new();
+        if self.first {
+            pieces.push(Self::arrow(-3.));
+            pieces.push(Self::line(-3. + Self::ARROW - 2., Some(dot_top)));
+        } else {
+            pieces.push(Self::line(0., Some(dot_top)));
+        }
         if !self.last {
-            pieces.push(
-                div()
-                    .absolute()
-                    .top(px(Self::DOT_MIDDLE + DOT_SLOT / 2.))
-                    .bottom(px(0.))
-                    .left(px(Self::LEFT))
-                    .w(px(2.))
-                    .bg(rgb(theme::SURFACE_ACTIVE))
-                    .into_any_element(),
-            );
+            pieces.push(Self::arrow(dot_bottom));
+            pieces.push(Self::line(dot_bottom + Self::ARROW - 2., None));
         }
         pieces
+    }
+
+    fn arrow(top: f32) -> gpui::AnyElement {
+        div()
+            .absolute()
+            .top(px(top))
+            .left(px(Self::LEFT - 4.))
+            .w(px(10.))
+            .h(px(Self::ARROW))
+            .flex()
+            .justify_center()
+            .text_size(px(Self::ARROW))
+            .line_height(px(Self::ARROW))
+            .text_color(rgb(theme::MUTED))
+            .child("▲")
+            .into_any_element()
+    }
+
+    /// A stretch of the line from `top` down to `bottom`, or to the end of
+    /// the PR's block without one.
+    fn line(top: f32, bottom: Option<f32>) -> gpui::AnyElement {
+        div()
+            .absolute()
+            .top(px(top))
+            .map(|this| match bottom {
+                Some(bottom) => this.h(px(bottom - top)),
+                None => this.bottom(px(0.)),
+            })
+            .left(px(Self::LEFT))
+            .w(px(2.))
+            .bg(rgb(theme::SURFACE_ACTIVE))
+            .into_any_element()
     }
 }
 
