@@ -126,6 +126,11 @@ impl SettingsView {
                 (text != initial).then(|| (setting.key, one_line(setting.key, text)))
             })
             .collect();
+        if let Some(error) = invalid(&changes) {
+            self.error = Some(error);
+            cx.notify();
+            return;
+        }
         self.saving = true;
         self.error = None;
         cx.notify();
@@ -194,6 +199,17 @@ impl SettingsView {
                     .child(input.clone()),
             )
     }
+}
+
+/// Why `changes` can't be saved, if one of them is out of its range.
+fn invalid(changes: &[(&str, String)]) -> Option<String> {
+    let (_, width) = changes
+        .iter()
+        .find(|(key, value)| *key == settings::COLUMN_WIDTH && !value.is_empty())?;
+    let fits = width
+        .parse::<f32>()
+        .is_ok_and(|width| settings::COLUMN_WIDTHS.contains(&width));
+    (!fits).then(|| "El ancho de las columnas va de 200 a 800 píxeles.".to_string())
 }
 
 /// What a field's text saves as: a list's lines joined by commas, any other
@@ -294,6 +310,16 @@ mod tests {
             one_line(REVIEWERS, "Matute:U1:nmaturana,\n Nico:U2:nmosnaim\n"),
             "Matute:U1:nmaturana,Nico:U2:nmosnaim"
         );
+    }
+
+    #[test]
+    fn a_column_width_out_of_range_or_not_a_number_is_refused() {
+        let width = |value: &str| vec![(settings::COLUMN_WIDTH, value.to_string())];
+
+        assert!(invalid(&width("360")).is_none());
+        assert!(invalid(&width("")).is_none());
+        assert!(invalid(&width("90")).is_some());
+        assert!(invalid(&width("ancho")).is_some());
     }
 
     #[test]

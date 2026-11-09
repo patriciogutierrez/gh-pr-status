@@ -85,7 +85,7 @@ const TITLE_INDENT: f32 = DOT_SLOT + 8.;
 /// The room the state dot takes, wide enough for the ring around it.
 const DOT_SLOT: f32 = 16.;
 
-/// How wide each column of a group's board is.
+/// How wide each column of a group's board is, unless Ajustes says otherwise.
 const BOARD_COLUMN: f32 = 300.;
 /// The board's scrollbar: its height and the room kept under the columns.
 const SCROLLBAR_HEIGHT: f32 = 6.;
@@ -2187,7 +2187,7 @@ impl Root {
             .flex()
             .flex_col()
             .gap_2()
-            .w(px(BOARD_COLUMN))
+            .w(px(board_column()))
             .flex_shrink_0()
             .p_2()
             .rounded_lg()
@@ -3278,6 +3278,20 @@ impl Render for Root {
                 "clic en el título abre el PR · ⋯ o clic derecho: acciones · arrástralo a un grupo · cmd-r actualiza · cmd-1/2 pestañas · cmd-, ajustes",
             ))
     }
+}
+
+/// The width of a board column: the one set in Ajustes, kept in range, or
+/// the default.
+fn board_column() -> f32 {
+    settings::get(settings::COLUMN_WIDTH)
+        .and_then(|width| width.parse::<f32>().ok())
+        .map(|width| {
+            width.clamp(
+                *settings::COLUMN_WIDTHS.start(),
+                *settings::COLUMN_WIDTHS.end(),
+            )
+        })
+        .unwrap_or(BOARD_COLUMN)
 }
 
 fn main() {
