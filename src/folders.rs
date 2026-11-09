@@ -14,6 +14,8 @@ use crate::db;
 
 /// Where the sidebar's width is remembered.
 const SIDEBAR_WIDTH: &str = "sidebar_width";
+/// Where the agent panel's height is remembered.
+const AGENT_HEIGHT: &str = "agent_height";
 /// Where the folded folders are remembered, as comma-separated ids.
 const COLLAPSED: &str = "collapsed";
 /// Where each folder's agent folder is remembered, followed by the folder id.
@@ -115,6 +117,15 @@ pub fn sidebar_width() -> Result<Option<f32>, String> {
 
 pub fn save_sidebar_width(width: f32) -> Result<(), String> {
     write_setting(&open()?, SIDEBAR_WIDTH, &width.to_string())
+}
+
+/// How tall the user last left the agent's panel, in pixels.
+pub fn agent_height() -> Result<Option<f32>, String> {
+    read_setting(&open()?, AGENT_HEIGHT).map(|value| value.and_then(|height| height.parse().ok()))
+}
+
+pub fn save_agent_height(height: f32) -> Result<(), String> {
+    write_setting(&open()?, AGENT_HEIGHT, &height.to_string())
 }
 
 /// The folder on disk where `folder`'s agent works, once it has one.

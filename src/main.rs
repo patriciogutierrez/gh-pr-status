@@ -55,8 +55,11 @@ actions!(
 /// it is checked.
 const AGENT_PROMPT_WAIT: Duration = Duration::from_secs(30);
 const AGENT_POLL: Duration = Duration::from_millis(500);
-/// The share of the window's height the agent's panel takes.
+/// The share of the window's height the agent's panel takes until resized.
 const AGENT_HEIGHT: f32 = 0.45;
+/// How short the agent's panel can get, and how much room it leaves the PRs.
+const AGENT_MIN: f32 = 120.;
+const PRS_MIN: f32 = 160.;
 
 /// How often the lists reload without being asked. Each reload is one GraphQL
 /// call per tab, one or two points of GitHub's 5,000-point hourly budget.
@@ -171,6 +174,16 @@ enum Editing {
 struct ResizeSidebar;
 
 impl Render for ResizeSidebar {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// What the handle carries while the agent panel's top edge is dragged; the
+/// panel itself follows the cursor.
+struct ResizeAgent;
+
+impl Render for ResizeAgent {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         gpui::Empty
     }
@@ -341,8 +354,12 @@ struct Root {
     /// Each group's agent terminal, by top-level group; kept running while
     /// the panel is closed.
     agents: HashMap<i64, Entity<terminal::Terminal>>,
-    /// The group whose agent shows in the panel beside the PRs.
+    /// The group whose agent shows in the panel under the PRs, while that
+    /// group is the one selected.
     agent_panel: Option<i64>,
+    /// The panel's height once the user dragged its edge; until then a share
+    /// of the window's.
+    agent_height: Option<f32>,
     /// PRs whose review threads are unfolded, by URL.
     threads_open: HashSet<String>,
     /// Where the board is scrolled to, for its scrollbar.
@@ -381,6 +398,7 @@ impl Root {
             opening_agent: None,
             agents: HashMap::new(),
             agent_panel: None,
+            agent_height: None,
             threads_open: HashSet::new(),
             board_scroll: gpui::ScrollHandle::new(),
             board_dragging: false,
@@ -392,6 +410,7 @@ impl Root {
         root.start_clock(cx);
         Self::load_folders(cx);
         Self::load_sidebar_width(cx);
+        Self::load_agent_height(cx);
         Self::load_review_asked(cx);
         root
     }
@@ -563,7 +582,7 @@ impl Root {
         let Some(root) = self.folders.root(id).map(|folder| folder.id) else {
             return;
         };
-        if self.agent_panel == Some(root) {
+        if self.shown_agent() == Some(root) {
             self.agent_panel = None;
             window.focus(&self.focus_handle);
             cx.notify();
@@ -586,6 +605,15 @@ impl Root {
             .get(&root)
             .filter(|agent| !agent.read(cx).exited)
             .cloned();
+        // The panel shows with its group, so a request from elsewhere goes
+        // to the group.
+        let selected = match self.filter {
+            Filter::Folder(id) => self.folders.root(id).map(|folder| folder.id),
+            _ => None,
+        };
+        if selected != Some(root) {
+            self.filter = Filter::Folder(root);
+        }
         if let Some(agent) = running {
             self.agent_panel = Some(root);
             window.focus(&agent.focus_handle(cx));
@@ -729,7 +757,10 @@ impl Root {
                 .flex()
                 .flex_col()
                 .flex_shrink_0()
-                .h(window.viewport_size().height * AGENT_HEIGHT)
+                .h(self
+                    .agent_height
+                    .map(px)
+                    .unwrap_or(window.viewport_size().height * AGENT_HEIGHT))
                 .rounded_lg()
                 .border_1()
                 .border_color(rgb(theme::BORDER))
@@ -939,6 +970,68 @@ impl Root {
             .ok();
         })
         .detach();
+    }
+
+    fn load_agent_height(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { folders::agent_height() })
+                .await;
+
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(height) => this.agent_height = height,
+                    Err(error) => this.folders_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Follows the cursor while the agent panel's top edge is dragged;
+    /// `bounds` holds the PRs and the panel.
+    fn resize_agent(&mut self, cursor: Pixels, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
+        let most = (f32::from(bounds.size.height) - PRS_MIN).max(AGENT_MIN);
+        let height =
+            (f32::from(bounds.bottom() - cursor) - HANDLE_WIDTH / 2.).clamp(AGENT_MIN, most);
+        if Some(height) != self.agent_height {
+            self.agent_height = Some(height);
+            cx.notify();
+        }
+    }
+
+    /// The strip between the PRs and the agent's panel. Dragging it resizes
+    /// the panel; the height is saved once it is let go.
+    fn agent_handle(&self) -> impl IntoElement {
+        div()
+            .id("agent-handle")
+            .group("agent-handle")
+            .flex()
+            .items_center()
+            .h(px(HANDLE_WIDTH))
+            .flex_shrink_0()
+            .cursor(gpui::CursorStyle::ResizeUpDown)
+            .on_drag(ResizeAgent, |_, _, _, cx| cx.new(|_| ResizeAgent))
+            .child(
+                div()
+                    .h(px(1.))
+                    .w_full()
+                    .bg(rgb(theme::SURFACE))
+                    .group_hover("agent-handle", |style| style.bg(rgb(theme::BORDER))),
+            )
+    }
+
+    /// The group whose agent the panel shows now: the one asked for, if it is
+    /// the selected group or the selected subgroup's.
+    fn shown_agent(&self) -> Option<i64> {
+        let Filter::Folder(id) = self.filter else {
+            return None;
+        };
+        let root = self.folders.root(id)?.id;
+        (self.agent_panel == Some(root)).then_some(root)
     }
 
     fn load_sidebar_width(cx: &mut Context<Self>) {
@@ -1972,8 +2065,7 @@ impl Root {
                 },
                 |this, id| {
                     let opening = self.opening_agent.is_some();
-                    let shown = self.agent_panel.is_some()
-                        && self.agent_panel == self.folders.root(id).map(|folder| folder.id);
+                    let shown = self.shown_agent().is_some();
                     this.child(ui::button(
                         "agent",
                         match (opening, shown) {
@@ -3408,6 +3500,23 @@ impl Render for Root {
             .text_color(rgb(theme::TEXT))
             .child(
                 div()
+                    .id("workspace")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .on_drag_move(cx.listener(
+                        |this, event: &gpui::DragMoveEvent<ResizeAgent>, _window, cx| {
+                            this.resize_agent(event.event.position.y, event.bounds, cx)
+                        },
+                    ))
+                    .on_drop(cx.listener(|this, _: &ResizeAgent, _window, cx| {
+                        if let Some(height) = this.agent_height {
+                            this.save(cx, move || folders::save_agent_height(height));
+                        }
+                    }))
+                    .child(
+                div()
                     .id("columns")
                     .flex()
                     .flex_1()
@@ -3434,10 +3543,11 @@ impl Render for Root {
                             .child(self.body(cx)),
                     ),
             )
-            .when_some(
-                self.agent_panel
-                    .and_then(|root| self.agent_panel(root, window, cx)),
-                |this, panel| this.child(panel),
+                    .when_some(
+                        self.shown_agent()
+                            .and_then(|root| self.agent_panel(root, window, cx)),
+                        |this, panel| this.child(self.agent_handle()).child(panel),
+                    ),
             )
             .when_some(self.menu.as_ref(), |this, menu| this.child(self.menu(menu, cx)))
             .child(div().text_xs().text_color(rgb(theme::MUTED)).child(
