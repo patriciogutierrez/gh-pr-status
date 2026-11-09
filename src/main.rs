@@ -2304,11 +2304,19 @@ impl Root {
             .hover(|style| style.bg(rgb(theme::ROW_HOVER)))
             .when_some(rail, |this, rail| this.relative().children(rail.pieces()))
             .child(
+                // On the first line of a title that wraps, so a stack's
+                // rail always meets the dot at the same height.
                 div()
                     .flex()
-                    .items_center()
+                    .items_start()
                     .gap_2()
-                    .child(state_dot(pull, self.review_asked.contains_key(&pull.url)))
+                    .child(
+                        div()
+                            .h(px(Rail::TITLE_LINE))
+                            .flex()
+                            .items_center()
+                            .child(state_dot(pull, self.review_asked.contains_key(&pull.url))),
+                    )
                     .child(
                         div()
                             .id(SharedString::from(format!("open-{}", pull.url)))
@@ -2623,7 +2631,9 @@ struct Rail {
 impl Rail {
     /// Where the dot's middle is, from the top of the PR's block: its top
     /// padding and half its title line.
-    const DOT_MIDDLE: f32 = 8. + 11.;
+    const DOT_MIDDLE: f32 = 8. + Self::TITLE_LINE / 2.;
+    /// The height of a title's line.
+    const TITLE_LINE: f32 = 22.;
     /// The rail's left edge, under the dot's middle.
     const LEFT: f32 = 12. + DOT_SLOT / 2. - 1.;
     /// The arrow's height; the line starts a bit inside it, under its tip.
