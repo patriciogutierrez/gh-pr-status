@@ -4,6 +4,7 @@
 //! cmd-click and scrolling back work as in macOS terminals.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -53,8 +54,14 @@ pub struct Terminal {
     pub title: Option<String>,
     /// Whether the shell is gone; nothing more can be typed.
     pub exited: bool,
+    /// The text selected with the mouse. Kept here rather than in the
+    /// emulator, which drops it whenever the lines under it are rewritten,
+    /// and Claude Code rewrites its own all the time.
+    selection: Rc<RefCell<Option<Selection>>>,
     /// Whether the mouse went down on the grid and is selecting.
     selecting: bool,
+    /// Whether cmd is held over a link, which then takes the hand cursor.
+    over_link: bool,
     /// Wheel scroll left over, under a line.
     scroll_rest: f32,
     focus_handle: FocusHandle,
@@ -196,7 +203,9 @@ impl Terminal {
             layout: Rc::new(std::cell::Cell::new(layout)),
             title: None,
             exited: false,
+            selection: Rc::new(RefCell::new(None)),
             selecting: false,
+            over_link: false,
             scroll_rest: 0.,
             focus_handle: cx.focus_handle(),
         }
@@ -300,17 +309,23 @@ impl Terminal {
         if self.exited {
             return;
         }
-        {
-            let mut term = self.term.lock();
-            term.selection = None;
-            term.scroll_display(Scroll::Bottom);
-        }
+        self.selection.replace(None);
+        self.term.lock().scroll_display(Scroll::Bottom);
         self.write(bytes);
         cx.notify();
     }
 
+    /// Copies the selection, lent to the emulator just to read its text.
     fn copy(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self.term.lock().selection_to_string() {
+        let Some(selection) = self.selection.borrow().clone() else {
+            return;
+        };
+        let mut term = self.term.lock();
+        term.selection = Some(selection);
+        let text = term.selection_to_string();
+        term.selection = None;
+        drop(term);
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -329,13 +344,13 @@ impl Terminal {
     }
 
     fn select_all(&mut self, cx: &mut Context<Self>) {
-        let mut term = self.term.lock();
+        let term = self.term.lock();
         let start = GridPoint::new(term.topmost_line(), Column(0));
         let end = GridPoint::new(term.bottommost_line(), term.last_column());
+        drop(term);
         let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
         selection.update(end, Side::Right);
-        term.selection = Some(selection);
-        drop(term);
+        self.selection.replace(Some(selection));
         cx.notify();
     }
 
@@ -374,17 +389,23 @@ impl Terminal {
             3.. => SelectionType::Lines,
             _ => SelectionType::Simple,
         };
-        self.term.lock().selection = Some(Selection::new(kind, point, side));
+        self.selection
+            .replace(Some(Selection::new(kind, point, side)));
         self.selecting = true;
         cx.notify();
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let (point, side) = self.cell_at(event.position);
+        let over_link = event.modifiers.platform && self.link_at(point).is_some();
+        if over_link != self.over_link {
+            self.over_link = over_link;
+            cx.notify();
+        }
         if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
             return;
         }
-        let (point, side) = self.cell_at(event.position);
-        if let Some(selection) = self.term.lock().selection.as_mut() {
+        if let Some(selection) = self.selection.borrow_mut().as_mut() {
             selection.update(point, side);
         }
         cx.notify();
@@ -392,11 +413,11 @@ impl Terminal {
 
     fn mouse_up(&mut self, cx: &mut Context<Self>) {
         self.selecting = false;
-        let mut term = self.term.lock();
-        if term.selection.as_ref().is_some_and(Selection::is_empty) {
-            term.selection = None;
+        let mut selection = self.selection.borrow_mut();
+        if selection.as_ref().is_some_and(Selection::is_empty) {
+            *selection = None;
         }
-        drop(term);
+        drop(selection);
         cx.notify();
     }
 
@@ -428,33 +449,25 @@ impl Terminal {
     }
 
     /// The link at `point`: the one the program attached to the cell, or a
-    /// URL written in the line, wrapped lines joined.
+    /// URL written there, followed onto the next lines when it was cut at
+    /// the right edge.
     fn link_at(&self, point: GridPoint) -> Option<String> {
         let term = self.term.lock();
         let grid = term.grid();
         if let Some(link) = grid[point].hyperlink() {
             return Some(link.uri().to_string());
         }
-        let columns = grid.columns();
-        let wraps = |line: i32| {
-            grid[Line(line)][Column(columns - 1)]
-                .flags
-                .contains(Flags::WRAPLINE)
-        };
-        let mut first = point.line.0;
-        while first > term.topmost_line().0 && wraps(first - 1) {
-            first -= 1;
-        }
-        let mut last = point.line.0;
-        while last < term.bottommost_line().0 && wraps(last) {
-            last += 1;
-        }
-        let text: Vec<char> = (first..=last)
-            .flat_map(|line| (0..columns).map(move |column| (line, column)))
-            .map(|(line, column)| grid[Line(line)][Column(column)].c)
+        let first = (point.line.0 - LINK_REACH).max(term.topmost_line().0);
+        let last = (point.line.0 + LINK_REACH).min(term.bottommost_line().0);
+        let rows: Vec<Vec<char>> = (first..=last)
+            .map(|line| {
+                let row = &grid[Line(line)];
+                (0..grid.columns())
+                    .map(|column| row[Column(column)].c)
+                    .collect()
+            })
             .collect();
-        let at = (point.line.0 - first) as usize * columns + point.column.0;
-        url_at(&text, at)
+        joined_url(&rows, (point.line.0 - first) as usize, point.column.0)
     }
 
     /// Lays the grid out in `bounds`, resizing the terminal when it no longer
@@ -463,6 +476,7 @@ impl Terminal {
         term: &FairMutex<Term<Listener>>,
         sender: &EventLoopSender,
         layout: &std::cell::Cell<Layout>,
+        selection: &RefCell<Option<Selection>>,
         bounds: Bounds<Pixels>,
         window: &mut Window,
     ) -> Frame {
@@ -487,6 +501,10 @@ impl Terminal {
         }
         layout.set(next);
 
+        let selected = selection
+            .borrow()
+            .as_ref()
+            .and_then(|selection| selection.to_range(&term));
         let content = term.renderable_content();
         let offset = content.display_offset as i32;
         let mut rows: Vec<Vec<(char, Style)>> = vec![Vec::with_capacity(next.columns); next.lines];
@@ -494,9 +512,7 @@ impl Terminal {
             let Some(row) = rows.get_mut((indexed.point.line.0 + offset) as usize) else {
                 continue;
             };
-            let selected = content
-                .selection
-                .is_some_and(|selection| selection.contains(indexed.point));
+            let selected = selected.is_some_and(|range| range.contains(indexed.point));
             row.push(cell_glyph(indexed.cell, content.colors, selected));
         }
         let cursor = (content.cursor.shape != CursorShape::Hidden).then(|| {
@@ -748,6 +764,51 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
+/// How many lines up and down a cut URL is followed.
+const LINK_REACH: i32 = 8;
+
+/// The URL at `column` of `rows[row]`. A row whose text reaches the right
+/// edge runs on into the next one, its indentation dropped, since Claude Code
+/// cuts a long URL into lines of its own.
+fn joined_url(rows: &[Vec<char>], row: usize, column: usize) -> Option<String> {
+    let full = |chars: &[char]| {
+        chars
+            .iter()
+            .rposition(|c| !c.is_whitespace())
+            .is_some_and(|end| end + 2 >= chars.len())
+    };
+    let mut first = row;
+    while first > 0 && full(&rows[first - 1]) {
+        first -= 1;
+    }
+    let mut last = row;
+    while last + 1 < rows.len() && full(&rows[last]) {
+        last += 1;
+    }
+    let mut text = Vec::new();
+    let mut at = None;
+    for (index, chars) in rows.iter().enumerate().take(last + 1).skip(first) {
+        let skip = if index == first {
+            0
+        } else {
+            chars.iter().take_while(|c| c.is_whitespace()).count()
+        };
+        let end = if index == last {
+            chars.len()
+        } else {
+            chars
+                .iter()
+                .rposition(|c| !c.is_whitespace())
+                .map_or(skip, |end| end + 1)
+        };
+        if index == row && column >= skip && column < end {
+            at = Some(text.len() + column - skip);
+        }
+        text.extend_from_slice(&chars[skip..end.max(skip)]);
+    }
+    url_at(&text, at?)
+}
+
 /// The URL in `text` that covers position `at`, without the punctuation
 /// that tends to follow one in prose.
 fn url_at(text: &[char], at: usize) -> Option<String> {
@@ -781,6 +842,7 @@ impl Render for Terminal {
         let term = self.term.clone();
         let sender = self.sender.clone();
         let layout = self.layout.clone();
+        let selection = self.selection.clone();
         let focused = self.focus_handle.is_focused(window);
 
         div()
@@ -799,13 +861,21 @@ impl Render for Terminal {
                 cx.listener(|this, _event, _window, cx| this.mouse_up(cx)),
             )
             .on_scroll_wheel(cx.listener(Self::scroll))
-            .cursor_text()
+            .map(|this| {
+                if self.over_link {
+                    this.cursor_pointer()
+                } else {
+                    this.cursor_text()
+                }
+            })
             .size_full()
             .p_2()
             .bg(rgb(BACKGROUND))
             .child(
                 canvas(
-                    move |bounds, window, _cx| Self::frame(&term, &sender, &layout, bounds, window),
+                    move |bounds, window, _cx| {
+                        Self::frame(&term, &sender, &layout, &selection, bounds, window)
+                    },
                     move |bounds, frame, window, cx| {
                         let line_height = frame.cell.height;
                         for (index, (text, runs)) in frame.rows.into_iter().enumerate() {
@@ -813,16 +883,16 @@ impl Render for Terminal {
                                 bounds.origin.x,
                                 bounds.origin.y + line_height * index as f32,
                             );
-                            window
-                                .text_system()
-                                .shape_line(
-                                    text.into(),
-                                    px(FONT_SIZE),
-                                    &runs,
-                                    Some(frame.cell.width),
-                                )
-                                .paint(origin, line_height, window, cx)
-                                .ok();
+                            let line = window.text_system().shape_line(
+                                text.into(),
+                                px(FONT_SIZE),
+                                &runs,
+                                Some(frame.cell.width),
+                            );
+                            // Backgrounds (the selection, inverse text) are
+                            // painted apart, under the glyphs.
+                            line.paint_background(origin, line_height, window, cx).ok();
+                            line.paint(origin, line_height, window, cx).ok();
                         }
                         if let Some(at) = frame.cursor {
                             let mut color: Hsla = rgb(theme::TEXT).into();
@@ -861,6 +931,24 @@ mod tests {
         );
         assert_eq!(url_at(&text, 1), None);
         assert_eq!(url_at(&text, 42), None);
+    }
+
+    #[test]
+    fn a_url_cut_at_the_right_edge_is_followed_onto_the_next_line() {
+        let rows = [
+            chars("  ver https://github.com/To"),
+            chars("  ku-IA/x/pull/7 listo     "),
+        ];
+
+        assert_eq!(
+            joined_url(&rows, 1, 4).as_deref(),
+            Some("https://github.com/Toku-IA/x/pull/7")
+        );
+        assert_eq!(
+            joined_url(&rows, 0, 10).as_deref(),
+            Some("https://github.com/Toku-IA/x/pull/7")
+        );
+        assert_eq!(joined_url(&rows, 1, 20), None);
     }
 
     #[test]
