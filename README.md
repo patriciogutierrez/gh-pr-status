@@ -143,7 +143,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   trackpad o con shift+rueda, arrastrando el espacio vacío del tablero (el cursor es una mano
   abierta, que se cierra al tomar), y con la barra que
   aparece abajo al pasar el mouse, cuyo pulgar se puede arrastrar.
-- **Un agente por grupo**, en un panel a la derecha de los PRs. Con un grupo elegido, el
+- **Un agente por grupo**, en un panel bajo los PRs, a lo ancho de la ventana. Con un grupo elegido, el
   botón **Agente** (o clic derecho → «Abrir agente») abre una terminal con
   `claude --add-dir ~/code` en la carpeta del grupo, para conversar qué hay que hacer y en qué
   repos; vuelve a la conversación anterior del grupo si la hay (`--continue`). El mismo botón

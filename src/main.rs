@@ -55,6 +55,8 @@ actions!(
 /// it is checked.
 const AGENT_PROMPT_WAIT: Duration = Duration::from_secs(30);
 const AGENT_POLL: Duration = Duration::from_millis(500);
+/// The share of the window's height the agent's panel takes.
+const AGENT_HEIGHT: f32 = 0.45;
 
 /// How often the lists reload without being asked. Each reload is one GraphQL
 /// call per tab, one or two points of GitHub's 5,000-point hourly budget.
@@ -707,8 +709,13 @@ impl Root {
         });
     }
 
-    /// The panel beside the PRs with the group's agent.
-    fn agent_panel(&self, root: i64, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    /// The panel under the PRs, as wide as the window, with the group's agent.
+    fn agent_panel(
+        &self,
+        root: i64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         let agent = self.agents.get(&root)?;
         let name = self.folders.get(root).map(|folder| folder.name.clone())?;
         let state = agent.read(cx);
@@ -721,9 +728,8 @@ impl Root {
             div()
                 .flex()
                 .flex_col()
-                .flex_1()
-                .min_w(px(0.))
-                .ml_3()
+                .flex_shrink_0()
+                .h(window.viewport_size().height * AGENT_HEIGHT)
                 .rounded_lg()
                 .border_1()
                 .border_color(rgb(theme::BORDER))
@@ -3426,11 +3432,12 @@ impl Render for Root {
                             .min_w(px(0.))
                             .child(self.header(cx))
                             .child(self.body(cx)),
-                    )
-                    .when_some(
-                        self.agent_panel.and_then(|root| self.agent_panel(root, cx)),
-                        |this, panel| this.child(panel),
                     ),
+            )
+            .when_some(
+                self.agent_panel
+                    .and_then(|root| self.agent_panel(root, window, cx)),
+                |this, panel| this.child(panel),
             )
             .when_some(self.menu.as_ref(), |this, menu| this.child(self.menu(menu, cx)))
             .child(div().text_xs().text_color(rgb(theme::MUTED)).child(
