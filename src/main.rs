@@ -36,16 +36,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
     AnimationExt, App, Application, Bounds, ClipboardItem, Context, FocusHandle, Focusable,
-    FontWeight, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, anchored, deferred, div,
-    prelude::*, px, rgb, size,
+    FontWeight, KeyBinding, KeyDownEvent, Menu as AppMenu, MenuItem, MouseButton, MouseDownEvent,
+    Pixels, Point, SharedString, SystemMenuType, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, actions, anchored, deferred, div, prelude::*, px, rgb, size,
 };
 
 use github::{PullRequest, Review, Snapshot};
 use pipeline::{Pipeline, State};
 use status::Group;
 
-actions!(app, [Refresh, ShowMine, ShowMerged, OpenSettings, Quit]);
+actions!(
+    app,
+    [Refresh, ShowMine, ShowMerged, OpenSettings, Hide, Quit]
+);
 
 /// How often the lists reload without being asked. Each reload is one GraphQL
 /// call per tab, one or two points of GitHub's 5,000-point hourly budget.
@@ -1825,12 +1828,6 @@ impl Root {
                 },
             )
             .child(ui::button(
-                "settings",
-                "Ajustes",
-                true,
-                cx.listener(|this, _event, _window, cx| this.open_settings(cx)),
-            ))
-            .child(ui::button(
                 "refresh",
                 if self.refreshing() {
                     "Actualizando…"
@@ -3202,7 +3199,6 @@ impl Render for Root {
             .on_action(cx.listener(|this, action, _window, cx| this.refresh(action, cx)))
             .on_action(cx.listener(|this, _: &ShowMine, _window, cx| this.show(Tab::Mine, cx)))
             .on_action(cx.listener(|this, _: &ShowMerged, _window, cx| this.show(Tab::Merged, cx)))
-            .on_action(cx.listener(|this, _: &OpenSettings, _window, cx| this.open_settings(cx)))
             .on_key_down(cx.listener(|this, event, _window, cx| this.edit_key(event, cx)))
             // Letting go of the scrollbar's thumb, anywhere.
             .on_mouse_up(
@@ -3262,12 +3258,15 @@ fn main() {
     }
     Application::new().run(|cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Hide, cx| cx.hide());
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-h", Hide, None),
+            // From any window, the settings one included, as the menu is.
+            KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-r", Refresh, Some("Root")),
             KeyBinding::new("cmd-1", ShowMine, Some("Root")),
             KeyBinding::new("cmd-2", ShowMerged, Some("Root")),
-            KeyBinding::new("cmd-,", OpenSettings, Some("Root")),
             // The comment field of the review window.
             KeyBinding::new("enter", text_input::Newline, Some("TextInput")),
             KeyBinding::new("backspace", text_input::Backspace, Some("TextInput")),
@@ -3296,25 +3295,47 @@ fn main() {
             KeyBinding::new("cmd-v", text_input::Paste, Some("TextInput")),
         ]);
 
+        // The app menu, the one named after the app at the top left.
+        cx.set_menus(vec![AppMenu {
+            name: "PR Manager".into(),
+            items: vec![
+                MenuItem::action("Ajustes…", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::os_submenu("Servicios", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Ocultar PR Manager", Hide),
+                MenuItem::action("Salir de PR Manager", Quit),
+            ],
+        }]);
+
         let bounds = Bounds::centered(None, size(px(960.), px(760.)), cx);
-        cx.open_window(
-            WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some(SharedString::from("PR Manager")),
+        let main_window = cx
+            .open_window(
+                WindowOptions {
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(SharedString::from("PR Manager")),
+                        ..Default::default()
+                    }),
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
-                }),
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |window, cx| {
-                let root = cx.new(Root::new);
-                // Nothing in the window is focusable on its own, so the root
-                // takes focus for the keybindings to reach it.
-                window.focus(&root.read(cx).focus_handle);
-                root
-            },
-        )
-        .unwrap();
+                },
+                |window, cx| {
+                    let root = cx.new(Root::new);
+                    // Nothing in the window is focusable on its own, so the root
+                    // takes focus for the keybindings to reach it.
+                    window.focus(&root.read(cx).focus_handle);
+                    root
+                },
+            )
+            .unwrap();
+        // Handled by the app rather than the main window, so the menu and
+        // cmd-, still work while another window is in front.
+        let root = main_window
+            .update(cx, |_, _, cx| cx.entity().downgrade())
+            .unwrap();
+        cx.on_action(move |_: &OpenSettings, cx| {
+            root.update(cx, |this, cx| this.open_settings(cx)).ok();
+        });
         cx.activate(true);
     });
 }

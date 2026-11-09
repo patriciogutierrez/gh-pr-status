@@ -36,7 +36,7 @@ La app **no guarda ni maneja ningún token**: reutiliza la sesión de `gh`. Bast
 ### 2. Configurar (opcional)
 
 Sin configuración la app ya muestra tus PRs, sus checks, reviews y conflictos, y avisa
-cuando te aprueban uno. El resto se configura en la ventana **Ajustes** (botón «Ajustes» o
+cuando te aprueban uno. El resto se configura en la ventana **Ajustes** (menú **PR Manager → Ajustes…** o
 cmd-,): el seguimiento del **pipeline de deploy** (ver [El pipeline](#el-pipeline)), el
 formulario de review de Slack y la carpeta del agente. Se guardan en este Mac, en
 `~/Library/Application Support/PR Manager/settings.sqlite`, salvo el webhook y el token de

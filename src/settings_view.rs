@@ -30,8 +30,18 @@ pub struct SettingsView {
     focus_handle: FocusHandle,
 }
 
-/// Opens the settings in a window of its own, centered.
+/// Opens the settings in a window of its own, centered, or brings the one
+/// already open to the front.
 pub fn open(on_saved: impl Fn(&mut App) + 'static, cx: &mut App) -> Result<(), String> {
+    if let Some(open) = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<SettingsView>())
+    {
+        return open
+            .update(cx, |_, window, _| window.activate_window())
+            .map_err(|error| format!("No se pudo abrir la ventana: {error}"));
+    }
     let bounds = Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx);
     cx.open_window(
         WindowOptions {
