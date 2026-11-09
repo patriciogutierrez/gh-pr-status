@@ -24,9 +24,9 @@ use alacritty_terminal::tty::{self, Shell};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 use gpui::{
     App, Bounds, ClipboardItem, Context, FocusHandle, Focusable, Font, FontStyle, FontWeight, Hsla,
-    KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    ScrollDelta, ScrollWheelEvent, Size, TextRun, UnderlineStyle, Window, canvas, div, fill, font,
-    point, prelude::*, px, rgb, size,
+    KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, Render, ScrollDelta, ScrollWheelEvent, Size, TextRun, UnderlineStyle, Window, canvas,
+    div, fill, font, point, prelude::*, px, rgb, size,
 };
 
 use crate::theme;
@@ -62,6 +62,10 @@ pub struct Terminal {
     selecting: bool,
     /// Whether cmd is held over a link, which then takes the hand cursor.
     over_link: bool,
+    /// The cell a press was reported in to a program that asked for the
+    /// mouse, while the button is down, and the last cell a move was.
+    reported: Option<(usize, usize)>,
+    last_motion: Option<(usize, usize)>,
     /// Wheel scroll left over, under a line.
     scroll_rest: f32,
     focus_handle: FocusHandle,
@@ -206,6 +210,8 @@ impl Terminal {
             selection: Rc::new(RefCell::new(None)),
             selecting: false,
             over_link: false,
+            reported: None,
+            last_motion: None,
             scroll_rest: 0.,
             focus_handle: cx.focus_handle(),
         }
@@ -375,6 +381,26 @@ impl Terminal {
         )
     }
 
+    /// The cell under `position` on screen, column and row from the top
+    /// left, as a program that asked for the mouse counts them.
+    fn screen_cell(&self, position: Point<Pixels>) -> (usize, usize) {
+        let (point, _) = self.cell_at(position);
+        let offset = self.term.lock().grid().display_offset() as i32;
+        (point.column.0, (point.line.0 + offset).max(0) as usize)
+    }
+
+    /// Whether the program asked for the mouse and this click is its: shift
+    /// or option keep it for selecting, as macOS terminals do.
+    fn mouse_for_program(&self, modifiers: &gpui::Modifiers) -> Option<TermMode> {
+        let mode = *self.term.lock().mode();
+        (mode.intersects(TermMode::MOUSE_MODE) && !modifiers.shift && !modifiers.alt)
+            .then_some(mode)
+    }
+
+    fn report(&self, report: MouseReport, mode: TermMode) {
+        self.write(mouse_bytes(report, mode.contains(TermMode::SGR_MOUSE)));
+    }
+
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
         let (point, side) = self.cell_at(event.position);
@@ -382,6 +408,24 @@ impl Terminal {
             if let Some(url) = self.link_at(point) {
                 cx.open_url(&url);
             }
+            return;
+        }
+        if let Some(mode) = self.mouse_for_program(&event.modifiers) {
+            let cell = self.screen_cell(event.position);
+            self.report(
+                MouseReport {
+                    button: 0,
+                    cell,
+                    pressed: true,
+                    motion: false,
+                    modifiers: event.modifiers,
+                },
+                mode,
+            );
+            self.reported = Some(cell);
+            self.last_motion = Some(cell);
+            self.selection.replace(None);
+            cx.notify();
             return;
         }
         let kind = match event.click_count {
@@ -402,6 +446,28 @@ impl Terminal {
             self.over_link = over_link;
             cx.notify();
         }
+        let mode = *self.term.lock().mode();
+        let dragging = self.reported.is_some() && event.pressed_button == Some(MouseButton::Left);
+        let wanted = (dragging && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION))
+            || (event.pressed_button.is_none() && mode.contains(TermMode::MOUSE_MOTION));
+        if wanted {
+            let cell = self.screen_cell(event.position);
+            if self.last_motion != Some(cell) {
+                self.last_motion = Some(cell);
+                self.report(
+                    MouseReport {
+                        // With no button down, a move reports button 3.
+                        button: if dragging { 0 } else { 3 },
+                        cell,
+                        pressed: true,
+                        motion: true,
+                        modifiers: event.modifiers,
+                    },
+                    mode,
+                );
+            }
+            return;
+        }
         if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
             return;
         }
@@ -411,7 +477,28 @@ impl Terminal {
         cx.notify();
     }
 
-    fn mouse_up(&mut self, cx: &mut Context<Self>) {
+    fn mouse_up(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reported.take().is_some() {
+            let mode = *self.term.lock().mode();
+            if mode.intersects(TermMode::MOUSE_MODE) {
+                self.report(
+                    MouseReport {
+                        button: 0,
+                        cell: self.screen_cell(position),
+                        pressed: false,
+                        motion: false,
+                        modifiers,
+                    },
+                    mode,
+                );
+            }
+            return;
+        }
         self.selecting = false;
         let mut selection = self.selection.borrow_mut();
         if selection.as_ref().is_some_and(Selection::is_empty) {
@@ -432,6 +519,22 @@ impl Terminal {
         let whole = lines.trunc();
         self.scroll_rest = lines - whole;
         if whole == 0. {
+            return;
+        }
+        if let Some(mode) = self.mouse_for_program(&event.modifiers) {
+            let cell = self.screen_cell(event.position);
+            for _ in 0..whole.abs() as usize {
+                self.report(
+                    MouseReport {
+                        button: if whole > 0. { 64 } else { 65 },
+                        cell,
+                        pressed: true,
+                        motion: false,
+                        modifiers: event.modifiers,
+                    },
+                    mode,
+                );
+            }
             return;
         }
         let mut term = self.term.lock();
@@ -753,6 +856,43 @@ fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// A mouse event for a program that asked for the mouse.
+#[derive(Copy, Clone)]
+struct MouseReport {
+    /// 0 the left button, 3 none, 64 and 65 the wheel up and down.
+    button: u8,
+    /// Column and row on screen, from 0.
+    cell: (usize, usize),
+    pressed: bool,
+    motion: bool,
+    modifiers: gpui::Modifiers,
+}
+
+/// How a mouse event is told to the program: as SGR (`ESC [ < b ; x ; y M`)
+/// when it asked for that, else in the old single-byte form, which can't
+/// reach past column 223.
+fn mouse_bytes(report: MouseReport, sgr: bool) -> Vec<u8> {
+    let modifiers = &report.modifiers;
+    let mut button = report.button
+        + 4 * u8::from(modifiers.shift)
+        + 8 * u8::from(modifiers.alt)
+        + 16 * u8::from(modifiers.control);
+    if report.motion {
+        button += 32;
+    }
+    let (column, row) = (report.cell.0 + 1, report.cell.1 + 1);
+    if sgr {
+        let end = if report.pressed { 'M' } else { 'm' };
+        return format!("\x1b[<{button};{column};{row}{end}").into_bytes();
+    }
+    if !report.pressed {
+        // The old form has no release per button, only "released".
+        button = 3 + (button & !3);
+    }
+    let byte = |value: usize| (32 + value).min(255) as u8;
+    vec![0x1b, b'[', b'M', 32 + button, byte(column), byte(row)]
+}
+
 /// Pasted text, its line breaks as the return key and, when the program
 /// asked, marked as a paste so it isn't taken as typed.
 fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
@@ -854,11 +994,15 @@ impl Render for Terminal {
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| this.mouse_up(cx)),
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.mouse_up(event.position, event.modifiers, cx)
+                }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| this.mouse_up(cx)),
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.mouse_up(event.position, event.modifiers, cx)
+                }),
             )
             .on_scroll_wheel(cx.listener(Self::scroll))
             .map(|this| {
@@ -949,6 +1093,28 @@ mod tests {
             Some("https://github.com/Toku-IA/x/pull/7")
         );
         assert_eq!(joined_url(&rows, 1, 20), None);
+    }
+
+    #[test]
+    fn a_click_is_told_to_the_program_as_sgr_or_the_old_form() {
+        let click = |pressed| MouseReport {
+            button: 0,
+            cell: (9, 4),
+            pressed,
+            motion: false,
+            modifiers: gpui::Modifiers::default(),
+        };
+
+        assert_eq!(mouse_bytes(click(true), true), b"\x1b[<0;10;5M");
+        assert_eq!(mouse_bytes(click(false), true), b"\x1b[<0;10;5m");
+        assert_eq!(
+            mouse_bytes(click(true), false),
+            vec![0x1b, b'[', b'M', 32, 42, 37]
+        );
+        assert_eq!(
+            mouse_bytes(click(false), false),
+            vec![0x1b, b'[', b'M', 35, 42, 37]
+        );
     }
 
     #[test]

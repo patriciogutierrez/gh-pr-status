@@ -152,7 +152,9 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   macOS: cmd-C copia lo seleccionado con el mouse (doble clic, una palabra; triple, la línea),
   cmd-V pega (sin texto en el portapapeles, Claude Code pega la imagen), cmd-clic abre un link,
   la rueda recorre el historial, shift-enter u option-enter hace un salto de línea y
-  option-flechas mueven por palabra. La primera vez crea la carpeta del grupo en
+  option-flechas mueven por palabra. Si el programa pide el mouse, como los botones
+  «Mantener caliente» y «Ocultar» de Claude Code, los clics y la rueda van a él; con shift u
+  option se sigue seleccionando, y option-rueda recorre el historial. La primera vez crea la carpeta del grupo en
   `~/orca/groups/<grupo>/`, un repo git con un `CLAUDE.md` que le explica al agente cómo
   trabajar. El agente crea un worktree de [Orca](https://github.com/stablyai/orca) por repo,
   marcado con el grupo (`--comment gh-pr-status:group=<id>`), y los PRs que salgan de esas
