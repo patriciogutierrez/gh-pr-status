@@ -2619,9 +2619,9 @@ fn section(
         .children(rows)
 }
 
-/// Where a PR sits in a drawn stack: a line runs up from each dot to what
-/// it merges into, with the arrow at that end, under the branch for the
-/// first PR and under the previous PR's dot for the rest.
+/// Where a PR sits in a drawn stack: a line runs up from each dot to the
+/// PR it merges into, with the arrow under that PR's dot. The branch the
+/// first PR merges into is named above the stack, so it gets no arrow.
 #[derive(Copy, Clone)]
 struct Rail {
     first: bool,
@@ -2630,7 +2630,7 @@ struct Rail {
 
 impl Rail {
     /// Where the dot's middle is, from the top of the PR's block: its top
-    /// padding and half its title line.
+    /// padding and half its title's first line.
     const DOT_MIDDLE: f32 = 8. + Self::TITLE_LINE / 2.;
     /// The height of a title's line.
     const TITLE_LINE: f32 = 22.;
@@ -2639,17 +2639,13 @@ impl Rail {
     /// The arrow's height; the line starts a bit inside it, under its tip.
     const ARROW: f32 = 10.;
 
-    /// The line into this PR's dot from above, with the arrow at the
-    /// branch for the first, and the arrow under this dot that the line
-    /// from the next PR ends at.
+    /// The end of the line from the previous PR, into this dot, and the
+    /// arrow under this dot that the line from the next PR ends at.
     fn pieces(self) -> Vec<gpui::AnyElement> {
         let dot_top = Self::DOT_MIDDLE - DOT_SLOT / 2.;
         let dot_bottom = Self::DOT_MIDDLE + DOT_SLOT / 2.;
         let mut pieces = Vec::new();
-        if self.first {
-            pieces.push(Self::arrow(-3.));
-            pieces.push(Self::line(-3. + Self::ARROW - 2., Some(dot_top)));
-        } else {
+        if !self.first {
             pieces.push(Self::line(0., Some(dot_top)));
         }
         if !self.last {
