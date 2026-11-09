@@ -284,7 +284,7 @@ fn parse_pull(node: &Value) -> Option<PullRequest> {
             .as_str()
             .and_then(parse_timestamp)
             .unwrap_or(0),
-        pipeline: Pipeline::latest(&node["recentComments"], Settings::get()),
+        pipeline: Pipeline::latest(&node["recentComments"], &Settings::get()),
     })
 }
 

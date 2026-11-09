@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use crate::folders::{self, Folder, Folders};
 use crate::github::PullRequest;
+use crate::settings;
 use crate::tool;
 
 /// What a worktree's Orca comment starts with when it belongs to a group.
@@ -460,9 +461,9 @@ fn quote(text: &str) -> String {
 }
 
 fn code_dir() -> Result<String, String> {
-    match env::var("GH_PR_STATUS_CODE_DIR") {
-        Ok(dir) if !dir.trim().is_empty() => Ok(dir.trim().to_string()),
-        _ => Ok(home()?.join(CODE_DIR).to_string_lossy().to_string()),
+    match settings::get(settings::CODE_DIR) {
+        Some(dir) => Ok(dir),
+        None => Ok(home()?.join(CODE_DIR).to_string_lossy().to_string()),
     }
 }
 
