@@ -324,6 +324,10 @@ struct Root {
     /// Why reading or saving the groups last failed.
     folders_error: Option<String>,
     filter: Filter,
+    /// The account, user or organization, whose PRs alone show; `None` for all.
+    owner: Option<String>,
+    /// Whether the account picker's options are open.
+    owners_open: bool,
     editor: Option<Editor>,
     /// The sidebar entry under the mouse, whose name scrolls if it is cut.
     hovered: Option<Filter>,
@@ -360,6 +364,8 @@ impl Root {
             folders: folders::Folders::default(),
             folders_error: None,
             filter: Filter::All,
+            owner: None,
+            owners_open: false,
             editor: None,
             hovered: None,
             sidebar_width: SIDEBAR_WIDTH,
@@ -792,6 +798,37 @@ impl Root {
         .detach();
     }
 
+    /// Shows only `owner`'s PRs, or everyone's. A group whose PRs are all
+    /// another account's hides, so a selected one gives way to "Todos".
+    fn pick_owner(&mut self, owner: Option<String>, cx: &mut Context<Self>) {
+        self.owner = owner;
+        self.owners_open = false;
+        if let Filter::Folder(id) = self.filter
+            && self.hidden(id)
+        {
+            self.filter = Filter::All;
+        }
+        cx.notify();
+    }
+
+    /// The accounts the user's PRs, open or merged, belong to, A to Z.
+    fn owners(&self) -> Vec<String> {
+        let merged = self.merged.pulls.iter().flatten().map(|pull| &pull.url);
+        let mut owners: Vec<String> = self
+            .mine
+            .pulls()
+            .iter()
+            .map(|pull| &pull.url)
+            .chain(merged)
+            .filter_map(|url| owner_of(url))
+            .map(str::to_string)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        owners.sort_by_key(|owner| owner.to_lowercase());
+        owners
+    }
+
     /// Follows the cursor while the sidebar's edge is dragged; `left` is where
     /// the sidebar starts.
     fn resize_sidebar(&mut self, cursor: Pixels, left: Pixels, cx: &mut Context<Self>) {
@@ -847,6 +884,9 @@ impl Root {
 
     /// Whether the sidebar's filter lets the PR at `url` through.
     fn shows(&self, url: &str) -> bool {
+        if !self.owns(url) {
+            return false;
+        }
         match self.filter {
             Filter::All => true,
             Filter::Loose => !self.folders.by_url.contains_key(url),
@@ -856,6 +896,42 @@ impl Root {
                 .get(url)
                 .is_some_and(|member| self.folders.includes(id, *member)),
         }
+    }
+
+    /// Whether the PR at `url` belongs to the account picked, if any.
+    fn owns(&self, url: &str) -> bool {
+        self.owner
+            .as_deref()
+            .is_none_or(|owner| owner_of(url) == Some(owner))
+    }
+
+    /// How many of the open PRs the account picker lets through are in
+    /// group `id` or its subgroups.
+    fn in_folder(&self, id: i64) -> usize {
+        self.open_urls()
+            .iter()
+            .filter(|url| self.inside(id, url))
+            .count()
+    }
+
+    /// Whether the account picked leaves group `id` out: it has open PRs, but
+    /// none of that account's. An empty group stays.
+    fn hidden(&self, id: i64) -> bool {
+        self.owner.is_some()
+            && self.in_folder(id) == 0
+            && self
+                .mine
+                .pulls()
+                .iter()
+                .any(|pull| self.inside(id, &pull.url))
+    }
+
+    /// Whether the PR at `url` is in group `id` or its subgroups.
+    fn inside(&self, id: i64, url: &str) -> bool {
+        self.folders
+            .by_url
+            .get(url)
+            .is_some_and(|member| self.folders.includes(id, *member))
     }
 
     fn select(&mut self, filter: Filter, cx: &mut Context<Self>) {
@@ -1313,12 +1389,13 @@ impl Root {
         }
     }
 
-    /// The URLs of the user's open PRs.
+    /// The URLs of the user's open PRs, of the account picked if any.
     fn open_urls(&self) -> HashSet<&str> {
         self.mine
             .pulls()
             .iter()
             .map(|pull| pull.url.as_str())
+            .filter(|url| self.owns(url))
             .collect()
     }
 
@@ -1328,16 +1405,8 @@ impl Root {
     /// grupo", into a new one.
     fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let open = self.open_urls();
-        let in_folder = |id: i64| {
-            open.iter()
-                .filter(|url| {
-                    self.folders
-                        .by_url
-                        .get(**url)
-                        .is_some_and(|member| self.folders.includes(id, *member))
-                })
-                .count()
-        };
+        let in_folder = |id: i64| self.in_folder(id);
+        let hidden = |id: i64| self.hidden(id);
         let loose = open
             .iter()
             .filter(|url| !self.folders.by_url.contains_key(**url))
@@ -1354,10 +1423,13 @@ impl Root {
             .folders
             .list
             .iter()
-            .filter(|folder| folder.parent.is_none())
+            .filter(|folder| folder.parent.is_none() && !hidden(folder.id))
         {
             let folded = self.folders.collapsed.contains(&root.id);
-            let children = self.folders.children(root.id).filter(|_| !folded);
+            let children = self
+                .folders
+                .children(root.id)
+                .filter(|child| !folded && !hidden(child.id));
             for folder in std::iter::once(root).chain(children) {
                 let id = folder.id;
                 let indented = folder.parent.is_some();
@@ -1399,6 +1471,7 @@ impl Root {
             .w(px(self.sidebar_width))
             .flex_shrink_0()
             .overflow_y_scroll()
+            .child(self.owner_picker(window, cx))
             .child(
                 div()
                     .px_2()
@@ -1458,6 +1531,114 @@ impl Root {
                         .text_xs()
                         .text_color(rgb(theme::RED))
                         .child(error),
+                )
+            })
+    }
+
+    /// The account the PRs are filtered to. Its options open right under it,
+    /// as wide as it; a click anywhere else closes them.
+    fn owner_picker(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let picked = self.owner.is_some();
+        let options: Vec<_> = std::iter::once(None)
+            .chain(self.owners().into_iter().map(Some))
+            .enumerate()
+            .map(|(index, owner)| {
+                let mark = if owner == self.owner { "✓" } else { "" };
+                let label = owner.clone().unwrap_or("Todas las cuentas".to_string());
+                div()
+                    .id(SharedString::from(format!("owner-{index}")))
+                    .flex()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+                    .child(div().w(px(12.)).flex_shrink_0().child(mark))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(label))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.pick_owner(owner.clone(), cx)
+                    }))
+            })
+            .collect();
+
+        div()
+            .mb_2()
+            .child(
+                div()
+                    .id("owner-picker")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .text_sm()
+                    .text_color(rgb(if picked {
+                        theme::ACCENT
+                    } else {
+                        theme::SUBTEXT
+                    }))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme::SURFACE_HOVER)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.owners_open = true;
+                        cx.notify();
+                    }))
+                    .child(
+                        div().flex_1().min_w(px(0.)).truncate().child(
+                            self.owner
+                                .clone()
+                                .unwrap_or("Todas las cuentas".to_string()),
+                        ),
+                    )
+                    .child(div().text_xs().text_color(rgb(theme::MUTED)).child("▾")),
+            )
+            .when(self.owners_open, |this| {
+                this.child(
+                    // Covers the window so a click outside the options, the
+                    // picker included, only closes them.
+                    deferred(
+                        anchored().position(Point::default()).child(
+                            div()
+                                .id("owner-backdrop")
+                                .occlude()
+                                .w(window.viewport_size().width)
+                                .h(window.viewport_size().height)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _event, _window, cx| {
+                                        this.owners_open = false;
+                                        cx.notify();
+                                    }),
+                                ),
+                        ),
+                    )
+                    .with_priority(1),
+                )
+                .child(
+                    deferred(
+                        anchored().snap_to_window().child(
+                            div()
+                                .id("owner-options")
+                                .occlude()
+                                .mt_1()
+                                .w(px(self.sidebar_width))
+                                .flex()
+                                .flex_col()
+                                .p_1()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(theme::BORDER))
+                                .bg(rgb(theme::SURFACE))
+                                .shadow_lg()
+                                .text_sm()
+                                .children(options),
+                        ),
+                    )
+                    .with_priority(2),
                 )
             })
     }
@@ -1792,6 +1973,9 @@ impl Root {
         }
         for subgroup in self.folders.children(id) {
             let open = in_column(subgroup.id);
+            if self.hidden(subgroup.id) {
+                continue;
+            }
             columns.push(self.board_column(subgroup.id, &open, cx).into_any_element());
         }
 
@@ -2475,6 +2659,14 @@ fn into_load(result: Result<Snapshot, String>) -> Load {
     }
 }
 
+/// The user or organization a GitHub PR URL belongs to.
+fn owner_of(url: &str) -> Option<&str> {
+    url.strip_prefix("https://github.com/")?
+        .split('/')
+        .next()
+        .filter(|owner| !owner.is_empty())
+}
+
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3117,6 +3309,15 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pull_request_url_names_its_owner() {
+        assert_eq!(
+            owner_of("https://github.com/Toku-IA/payment-intent/pull/7711"),
+            Some("Toku-IA")
+        );
+        assert_eq!(owner_of("https://gitlab.com/Toku-IA/x/pull/1"), None);
+    }
 
     #[test]
     fn a_long_name_waits_slides_to_its_end_holds_and_comes_back() {
