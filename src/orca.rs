@@ -1,5 +1,5 @@
-//! Each group's agent: a Claude Code session in an Orca terminal, working from
-//! a folder of its own with every repo of `~/code` readable.
+//! Each group's agent: a Claude Code session in the app's terminal panel,
+//! working from a folder of its own with every repo of `~/code` readable.
 //!
 //! The agent plans in its folder and makes the changes in Orca worktrees it
 //! tags with the group (`--comment gh-pr-status:group=<id>`). Orca refuses a
@@ -12,7 +12,6 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -47,58 +46,45 @@ pub struct Worktree {
     pub folder: i64,
 }
 
-/// Opens the group's agent in Orca, or brings back the one already open. The
-/// first time it makes the group's folder and registers it in Orca. `folder` is
-/// a top-level group and `subgroups` its subgroups.
-pub fn open_agent(folder: &Folder, subgroups: &[Folder]) -> Result<(), String> {
-    agent_terminal(folder, subgroups)?;
-    focus_orca()
+/// Where a group's agent runs and what starts it.
+pub struct Launch {
+    pub dir: PathBuf,
+    pub command: String,
 }
 
-/// Opens the group's agent and hands it `task` on `pull`: waits for the
-/// session to be idle, then types the request and submits it. A session still
-/// asking whether to trust its folder gets nothing, since typing there would
-/// answer the question.
-pub fn ask_agent(
-    folder: &Folder,
-    subgroups: &[Folder],
-    pull: &PullRequest,
-    task: &str,
-) -> Result<(), String> {
-    let handle = agent_terminal(folder, subgroups)?;
-    match wait_for_prompt(&handle)? {
-        Screen::Prompt => {}
-        Screen::Trust => {
-            focus_orca()?;
-            return Err(
-                "El agente espera que confirmes la carpeta del grupo en Orca; después vuelve a pedirle."
-                    .to_string(),
-            );
-        }
-        Screen::Other => {
-            focus_orca()?;
-            return Err(
-                "El agente no mostró su prompt; pídele de nuevo cuando esté listo.".to_string(),
-            );
-        }
+/// The group's agent: Claude Code in the group's folder, made the first
+/// time, reading every repo, and back in its last conversation if it had
+/// one. `folder` is a top-level group and `subgroups` its subgroups.
+pub fn agent_launch(folder: &Folder, subgroups: &[Folder]) -> Result<Launch, String> {
+    let dir = agent_dir(folder)?;
+    write_subgroups_file(&dir, folder, subgroups)?;
+    let mut command = format!("claude --add-dir {}", quote(&code_dir()?));
+    if has_conversation(&dir)? {
+        command.push_str(" --continue");
     }
-    orca(&[
-        "terminal",
-        "send",
-        "--terminal",
-        &handle,
-        "--text",
-        &task_prompt(pull, task, folder, &code_dir()?),
-        "--enter",
-        "--wait-submit",
-        "5",
-    ])?;
-    focus_orca()
+    Ok(Launch { dir, command })
+}
+
+/// Whether Claude Code kept a conversation from `dir`, under the folder it
+/// names after the path with every other character a dash.
+fn has_conversation(dir: &Path) -> Result<bool, String> {
+    let name: String = dir
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let entries = match std::fs::read_dir(home()?.join(".claude/projects").join(name)) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(false),
+    };
+    Ok(entries
+        .flatten()
+        .any(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl")))
 }
 
 /// What the agent's terminal shows.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum Screen {
+pub enum Screen {
     /// Claude Code's input line, ready for a request.
     Prompt,
     /// Claude Code asking whether to trust the folder.
@@ -106,33 +92,8 @@ enum Screen {
     Other,
 }
 
-/// How long a fresh session gets to draw its prompt.
-const PROMPT_WAIT: Duration = Duration::from_secs(30);
-const PROMPT_POLL: Duration = Duration::from_millis(500);
-
-/// Polls the terminal's screen until Claude Code shows its prompt or its trust
-/// question. Orca's own idle wait returns while the shell is still launching
-/// `claude`, which is too early: typing then lands in the trust question.
-fn wait_for_prompt(handle: &str) -> Result<Screen, String> {
-    let started = Instant::now();
-    loop {
-        let screen = read_screen(handle)?;
-        if screen != Screen::Other || started.elapsed() >= PROMPT_WAIT {
-            return Ok(screen);
-        }
-        std::thread::sleep(PROMPT_POLL);
-    }
-}
-
-fn read_screen(handle: &str) -> Result<Screen, String> {
-    let result = orca(&["terminal", "read", "--terminal", handle, "--screen"])?;
-    let lines = result["terminal"]["tail"].as_array();
-    Ok(screen_of(
-        lines.into_iter().flatten().filter_map(Value::as_str),
-    ))
-}
-
-fn screen_of<'a>(lines: impl Iterator<Item = &'a str>) -> Screen {
+/// What the agent's screen shows, from its lines.
+pub fn screen_of<'a>(lines: impl Iterator<Item = &'a str>) -> Screen {
     let mut prompt = false;
     for line in lines {
         if line.contains("safety check") {
@@ -150,7 +111,7 @@ fn screen_of<'a>(lines: impl Iterator<Item = &'a str>) -> Screen {
 }
 
 /// What the agent is asked when a PR's next action is handed to it.
-fn task_prompt(pull: &PullRequest, task: &str, folder: &Folder, code: &str) -> String {
+pub fn task_prompt(pull: &PullRequest, task: &str, folder: &Folder, code: &str) -> String {
     let mut prompt = format!(
         "{task} en el PR #{} de {} ({}), rama `{}` sobre `{}`.",
         pull.number, pull.repo, pull.url, pull.head, pull.base
@@ -190,55 +151,6 @@ haz push y avísame.",
         pull.head
     ));
     prompt
-}
-
-/// The handle of the group's agent terminal, opened if it isn't yet.
-fn agent_terminal(folder: &Folder, subgroups: &[Folder]) -> Result<String, String> {
-    let dir = agent_dir(folder)?;
-    write_subgroups_file(&dir, folder, subgroups)?;
-    let path = dir.to_string_lossy().to_string();
-    let selector = format!("path:{path}");
-    register(&path)?;
-
-    let terminals = orca(&["terminal", "list", "--worktree", &selector])?;
-    let live = terminals["terminals"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|terminal| terminal["connected"].as_bool() == Some(true))
-        .and_then(|terminal| terminal["handle"].as_str().map(str::to_string));
-    match live {
-        Some(handle) => {
-            orca(&["terminal", "switch", "--terminal", &handle])?;
-            Ok(handle)
-        }
-        None => {
-            let created = orca(&[
-                "terminal",
-                "create",
-                "--worktree",
-                &selector,
-                "--title",
-                &folder.name,
-                "--command",
-                &format!("claude --add-dir {}", quote(&code_dir()?)),
-                "--focus",
-            ])?;
-            created["terminal"]["handle"]
-                .as_str()
-                .map(str::to_string)
-                .ok_or_else(|| "Orca no devolvió la terminal creada".to_string())
-        }
-    }
-}
-
-/// `--focus` picks the tab; this brings Orca itself to the front.
-fn focus_orca() -> Result<(), String> {
-    Command::new("open")
-        .args(["-a", "Orca"])
-        .status()
-        .map(drop)
-        .map_err(|error| format!("No se pudo traer Orca al frente: {error}"))
 }
 
 /// Rewrites the group's `subgrupos.md`, if its agent was ever opened.
@@ -378,20 +290,6 @@ subgrupo al que pertenece el trabajo, y sus PRs aparecerán en ese subgrupo.
     text
 }
 
-/// Adds the folder to Orca unless it already is there.
-fn register(path: &str) -> Result<(), String> {
-    let repos = orca(&["repo", "list"])?;
-    let known = repos["repos"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|repo| repo["path"].as_str() == Some(path));
-    if !known {
-        orca(&["repo", "add", "--path", path])?;
-    }
-    Ok(())
-}
-
 fn claude_md(folder: &Folder, code: &str) -> String {
     format!(
         "# Grupo: {name}
@@ -460,7 +358,7 @@ fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
-fn code_dir() -> Result<String, String> {
+pub fn code_dir() -> Result<String, String> {
     match settings::get(settings::CODE_DIR) {
         Some(dir) => Ok(dir),
         None => Ok(home()?.join(CODE_DIR).to_string_lossy().to_string()),

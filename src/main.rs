@@ -26,6 +26,7 @@ mod settings_view;
 mod slack;
 mod stack;
 mod status;
+mod terminal;
 mod text_input;
 mod theme;
 mod tool;
@@ -35,7 +36,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnimationExt, App, Application, Bounds, ClipboardItem, Context, FocusHandle, Focusable,
+    AnimationExt, App, Application, Bounds, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     FontWeight, KeyBinding, KeyDownEvent, Menu as AppMenu, MenuItem, MouseButton, MouseDownEvent,
     Pixels, Point, SharedString, SystemMenuType, TitlebarOptions, Window, WindowBounds,
     WindowOptions, actions, anchored, deferred, div, prelude::*, px, rgb, size,
@@ -49,6 +50,11 @@ actions!(
     app,
     [Refresh, ShowMine, ShowMerged, OpenSettings, Hide, Quit]
 );
+
+/// How long a fresh agent gets to show Claude Code's prompt, and how often
+/// it is checked.
+const AGENT_PROMPT_WAIT: Duration = Duration::from_secs(30);
+const AGENT_POLL: Duration = Duration::from_millis(500);
 
 /// How often the lists reload without being asked. Each reload is one GraphQL
 /// call per tab, one or two points of GitHub's 5,000-point hourly budget.
@@ -328,8 +334,13 @@ struct Root {
     /// The sidebar entry under the mouse, whose name scrolls if it is cut.
     hovered: Option<Filter>,
     sidebar_width: f32,
-    /// The group whose agent is being opened in Orca.
+    /// The group whose agent is being opened.
     opening_agent: Option<i64>,
+    /// Each group's agent terminal, by top-level group; kept running while
+    /// the panel is closed.
+    agents: HashMap<i64, Entity<terminal::Terminal>>,
+    /// The group whose agent shows in the panel beside the PRs.
+    agent_panel: Option<i64>,
     /// PRs whose review threads are unfolded, by URL.
     threads_open: HashSet<String>,
     /// Where the board is scrolled to, for its scrollbar.
@@ -366,6 +377,8 @@ impl Root {
             hovered: None,
             sidebar_width: SIDEBAR_WIDTH,
             opening_agent: None,
+            agents: HashMap::new(),
+            agent_panel: None,
             threads_open: HashSet::new(),
             board_scroll: gpui::ScrollHandle::new(),
             board_dragging: false,
@@ -541,28 +554,73 @@ impl Root {
         }
     }
 
-    /// Opens the group's agent in Orca, or goes back to the one already open.
-    /// A subgroup opens its group's.
-    fn open_agent(&mut self, id: i64, cx: &mut Context<Self>) {
-        let Some(folder) = self.folders.root(id).cloned() else {
+    /// Shows the group's agent in the panel, starting it the first time or
+    /// after it ended, or hides the panel if it already shows it. A subgroup
+    /// opens its group's.
+    fn open_agent(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.folders.root(id).map(|folder| folder.id) else {
             return;
         };
-        let subgroups = self.subgroups(folder.id);
+        if self.agent_panel == Some(root) {
+            self.agent_panel = None;
+            window.focus(&self.focus_handle);
+            cx.notify();
+            return;
+        }
+        self.with_agent(root, window, cx, |_, _, _| {});
+    }
+
+    /// Runs `then` with the group's agent in the panel, focused, starting it
+    /// if it isn't running.
+    fn with_agent(
+        &mut self,
+        root: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &Entity<terminal::Terminal>, &mut Context<Self>) + 'static,
+    ) {
+        let running = self
+            .agents
+            .get(&root)
+            .filter(|agent| !agent.read(cx).exited)
+            .cloned();
+        if let Some(agent) = running {
+            self.agent_panel = Some(root);
+            window.focus(&agent.focus_handle(cx));
+            then(self, &agent, cx);
+            cx.notify();
+            return;
+        }
+        let Some(folder) = self.folders.root(root).cloned() else {
+            return;
+        };
         if self.opening_agent.is_some() {
             return;
         }
-        self.opening_agent = Some(id);
+        let subgroups = self.subgroups(folder.id);
+        self.opening_agent = Some(root);
         cx.notify();
 
-        cx.spawn(async move |this, cx| {
-            let result = cx
+        cx.spawn_in(window, async move |this, cx| {
+            let launch = cx
                 .background_executor()
-                .spawn(async move { orca::open_agent(&folder, &subgroups) })
+                .spawn(async move { orca::agent_launch(&folder, &subgroups) })
                 .await;
 
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 this.opening_agent = None;
-                this.folders_error = result.err();
+                let started =
+                    launch.and_then(|launch| terminal::start(&launch.dir, &launch.command));
+                match started {
+                    Ok(started) => {
+                        let agent = cx.new(|cx| terminal::Terminal::new(started, cx));
+                        this.agents.insert(root, agent.clone());
+                        this.agent_panel = Some(root);
+                        window.focus(&agent.focus_handle(cx));
+                        then(this, &agent, cx);
+                    }
+                    Err(error) => this.folders_error = Some(error),
+                }
                 cx.notify();
             })
             .ok();
@@ -570,9 +628,11 @@ impl Root {
         .detach();
     }
 
-    /// Hands the PR's next action to its group's agent. A PR in no group has
-    /// no agent to ask.
-    fn ask_agent(&mut self, url: &str, cx: &mut Context<Self>) {
+    /// Hands the PR's next action to its group's agent: opens it, waits for
+    /// Claude Code's prompt and types the request. A PR in no group has no
+    /// agent to ask, and a session still asking whether to trust its folder
+    /// gets nothing, since typing there would answer the question.
+    fn ask_agent(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pull) = self
             .mine
             .pulls()
@@ -598,27 +658,114 @@ impl Root {
             cx.notify();
             return;
         };
-        if self.opening_agent.is_some() {
-            return;
-        }
-        let subgroups = self.subgroups(folder.id);
-        self.opening_agent = Some(folder.id);
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { orca::ask_agent(&folder, &subgroups, &pull, &task) })
-                .await;
-
-            this.update(cx, |this, cx| {
-                this.opening_agent = None;
-                this.folders_error = result.err();
+        let prompt = match orca::code_dir() {
+            Ok(code) => orca::task_prompt(&pull, &task, &folder, &code),
+            Err(error) => {
+                self.folders_error = Some(error);
                 cx.notify();
+                return;
+            }
+        };
+        self.with_agent(folder.id, window, cx, move |_, agent, cx| {
+            let agent = agent.downgrade();
+            cx.spawn(async move |this, cx| {
+                let started = Instant::now();
+                let screen = loop {
+                    let screen = agent
+                        .read_with(cx, |agent, _| {
+                            orca::screen_of(agent.screen().iter().map(String::as_str))
+                        })
+                        .unwrap_or(orca::Screen::Other);
+                    if screen != orca::Screen::Other || started.elapsed() >= AGENT_PROMPT_WAIT {
+                        break screen;
+                    }
+                    cx.background_executor().timer(AGENT_POLL).await;
+                };
+                let error = match screen {
+                    orca::Screen::Prompt => {
+                        agent.update(cx, |agent, _| agent.write(prompt.into_bytes())).ok();
+                        // Claude Code takes a fast burst as a paste; the
+                        // return must come after it to submit.
+                        cx.background_executor().timer(AGENT_POLL).await;
+                        agent.update(cx, |agent, _| agent.write(&b"\r"[..])).ok();
+                        None
+                    }
+                    orca::Screen::Trust => Some(
+                        "El agente espera que confirmes la carpeta del grupo en su panel; después vuelve a pedirle.",
+                    ),
+                    orca::Screen::Other => {
+                        Some("El agente no mostró su prompt; pídele de nuevo cuando esté listo.")
+                    }
+                };
+                this.update(cx, |this, cx| {
+                    this.folders_error = error.map(str::to_string);
+                    cx.notify();
+                })
+                .ok();
             })
-            .ok();
-        })
-        .detach();
+            .detach();
+        });
+    }
+
+    /// The panel beside the PRs with the group's agent.
+    fn agent_panel(&self, root: i64, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let agent = self.agents.get(&root)?;
+        let name = self.folders.get(root).map(|folder| folder.name.clone())?;
+        let state = agent.read(cx);
+        let caption = if state.exited {
+            "terminó · «Agente» lo vuelve a abrir".to_string()
+        } else {
+            state.title.clone().unwrap_or_default()
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.))
+                .ml_3()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(theme::BORDER))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(rgb(theme::BORDER))
+                        .bg(rgb(theme::BASE))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_xs()
+                                .text_color(rgb(theme::MUTED))
+                                .child(caption),
+                        )
+                        .child(ui::button(
+                            "agent-close",
+                            "Cerrar",
+                            true,
+                            cx.listener(|this, _event, window, cx| {
+                                this.agent_panel = None;
+                                window.focus(&this.focus_handle);
+                                cx.notify();
+                            }),
+                        )),
+                )
+                .child(div().flex_1().min_h(px(0.)).child(agent.clone())),
+        )
     }
 
     /// Opens the review form for the PR in its own window.
@@ -1273,7 +1420,7 @@ impl Root {
                     } else {
                         format!("Pedir al agente: {task}")
                     },
-                    cx.listener(move |this, _event, _window, cx| this.ask_agent(&asked, cx)),
+                    cx.listener(move |this, _event, window, cx| this.ask_agent(&asked, window, cx)),
                 ));
             }
             // The docs check's logs never say more than its name does.
@@ -1319,9 +1466,9 @@ impl Root {
                     if subgroup {
                         "Abrir agente del grupo"
                     } else {
-                        "Abrir agente en Orca"
+                        "Abrir agente"
                     },
-                    cx.listener(move |this, _event, _window, cx| this.open_agent(id, cx)),
+                    cx.listener(move |this, _event, window, cx| this.open_agent(id, window, cx)),
                 )];
                 if !subgroup {
                     items.push(ui::menu_item(
@@ -1819,11 +1966,19 @@ impl Root {
                 },
                 |this, id| {
                     let opening = self.opening_agent.is_some();
+                    let shown = self.agent_panel.is_some()
+                        && self.agent_panel == self.folders.root(id).map(|folder| folder.id);
                     this.child(ui::button(
                         "agent",
-                        if opening { "Abriendo…" } else { "Agente" },
+                        match (opening, shown) {
+                            (true, _) => "Abriendo…",
+                            (false, true) => "Ocultar agente",
+                            (false, false) => "Agente",
+                        },
                         !opening,
-                        cx.listener(move |this, _event, _window, cx| this.open_agent(id, cx)),
+                        cx.listener(move |this, _event, window, cx| {
+                            this.open_agent(id, window, cx)
+                        }),
                     ))
                 },
             )
@@ -3271,6 +3426,10 @@ impl Render for Root {
                             .min_w(px(0.))
                             .child(self.header(cx))
                             .child(self.body(cx)),
+                    )
+                    .when_some(
+                        self.agent_panel.and_then(|root| self.agent_panel(root, cx)),
+                        |this, panel| this.child(panel),
                     ),
             )
             .when_some(self.menu.as_ref(), |this, menu| this.child(self.menu(menu, cx)))
