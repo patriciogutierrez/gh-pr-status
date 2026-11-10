@@ -9,7 +9,6 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -36,8 +35,6 @@ const FONT_SIZE: f32 = 13.;
 const LINE_HEIGHT: f32 = 17.;
 /// The terminal's own background, a step under the app's.
 const BACKGROUND: u32 = theme::MANTLE;
-/// How long to wait after output before drawing it, so a burst draws once.
-const FRAME: Duration = Duration::from_millis(8);
 /// The first 16 colors, Catppuccin Mocha's, as the rest of the app.
 const ANSI: [u32; 16] = [
     0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, 0x585b70,
@@ -235,11 +232,12 @@ impl Terminal {
                 if events.is_empty() {
                     break;
                 }
+                // No pause between bursts: the window already draws once per
+                // frame however many arrive, and a pause delays the echo.
                 let alive = this.update(cx, |this, cx| this.handle(events, cx)).is_ok();
                 if !alive {
                     break;
                 }
-                cx.background_executor().timer(FRAME).await;
             }
         })
         .detach();
@@ -512,12 +510,18 @@ impl Terminal {
     /// as macOS terminals do.
     fn scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let line = f32::from(self.layout.get().cell.height);
-        let lines = match event.delta {
-            ScrollDelta::Pixels(delta) => f32::from(delta.y) / line,
-            ScrollDelta::Lines(delta) => delta.y,
-        } + self.scroll_rest;
-        let whole = lines.trunc();
-        self.scroll_rest = lines - whole;
+        let whole = match event.delta {
+            // A trackpad's pixels add up until they make a line.
+            ScrollDelta::Pixels(delta) => {
+                let lines = f32::from(delta.y) / line + self.scroll_rest;
+                let whole = lines.trunc();
+                self.scroll_rest = lines - whole;
+                whole
+            }
+            // Each notch of a mouse wheel moves at least a line, however
+            // slowly it turns.
+            ScrollDelta::Lines(delta) => wheel_lines(delta.y),
+        };
         if whole == 0. {
             return;
         }
@@ -856,6 +860,16 @@ fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// The lines a mouse wheel's notch scrolls: what macOS says, rounded, but
+/// never less than one, which a slow turn would otherwise give.
+fn wheel_lines(delta: f32) -> f32 {
+    if delta == 0. {
+        0.
+    } else {
+        delta.signum() * delta.abs().round().max(1.)
+    }
+}
+
 /// A mouse event for a program that asked for the mouse.
 #[derive(Copy, Clone)]
 struct MouseReport {
@@ -1115,6 +1129,14 @@ mod tests {
             mouse_bytes(click(false), false),
             vec![0x1b, b'[', b'M', 35, 42, 37]
         );
+    }
+
+    #[test]
+    fn a_slow_wheel_notch_still_scrolls_a_line() {
+        assert_eq!(wheel_lines(0.1), 1.);
+        assert_eq!(wheel_lines(-0.3), -1.);
+        assert_eq!(wheel_lines(3.4), 3.);
+        assert_eq!(wheel_lines(0.), 0.);
     }
 
     #[test]

@@ -60,6 +60,9 @@ const AGENT_HEIGHT: f32 = 0.45;
 /// How short the agent's panel can get, and how much room it leaves the PRs.
 const AGENT_MIN: f32 = 120.;
 const PRS_MIN: f32 = 160.;
+/// The window's height outside the PRs and the panel: its padding, the gap
+/// and the shortcuts line at the bottom.
+const WINDOW_CHROME: f32 = 2. * 16. + 12. + 16.;
 
 /// How often the lists reload without being asked. Each reload is one GraphQL
 /// call per tab, one or two points of GitHub's 5,000-point hourly budget.
@@ -757,10 +760,7 @@ impl Root {
                 .flex()
                 .flex_col()
                 .flex_shrink_0()
-                .h(self
-                    .agent_height
-                    .map(px)
-                    .unwrap_or(window.viewport_size().height * AGENT_HEIGHT))
+                .h(px(self.agent_panel_height(window)))
                 .rounded_lg()
                 .border_1()
                 .border_color(rgb(theme::BORDER))
@@ -1001,6 +1001,17 @@ impl Root {
             self.agent_height = Some(height);
             cx.notify();
         }
+    }
+
+    /// The agent panel's height: the one dragged to, or a share of the
+    /// window, but never so tall that the PRs lose their room, as a height
+    /// saved in a bigger window would.
+    fn agent_panel_height(&self, window: &Window) -> f32 {
+        let window_height = f32::from(window.viewport_size().height);
+        let most = (window_height - WINDOW_CHROME - HANDLE_WIDTH - PRS_MIN).max(AGENT_MIN);
+        self.agent_height
+            .unwrap_or(window_height * AGENT_HEIGHT)
+            .clamp(AGENT_MIN, most)
     }
 
     /// The strip between the PRs and the agent's panel. Dragging it resizes
