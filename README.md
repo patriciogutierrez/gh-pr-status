@@ -147,8 +147,10 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   botón **Agente** (o clic derecho → «Abrir agente») abre una terminal con
   `claude --add-dir ~/code` en la carpeta del grupo, para conversar qué hay que hacer y en qué
   repos; vuelve a la conversación anterior del grupo si la hay (`--continue`). El mismo botón
-  lo oculta, igual que cambiar de grupo (vuelve al volver a él), y la sesión sigue corriendo hasta
-  cerrar la app. Su altura se ajusta arrastrando el borde de arriba y se recuerda. La terminal funciona como las de
+  lo oculta, y la sesión sigue corriendo hasta
+  cerrar la app. Con el panel abierto, cambiar de grupo muestra el agente de ese grupo, y el
+  panel se esconde en un grupo sin agente. Su altura se ajusta arrastrando el borde de arriba y se
+  recuerda. La terminal funciona como las de
   macOS: cmd-C copia lo seleccionado con el mouse (doble clic, una palabra; triple, la línea),
   cmd-V pega (sin texto en el portapapeles, Claude Code pega la imagen), cmd-clic abre un link,
   la rueda recorre el historial, shift-enter u option-enter hace un salto de línea y

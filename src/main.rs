@@ -357,9 +357,9 @@ struct Root {
     /// Each group's agent terminal, by top-level group; kept running while
     /// the panel is closed.
     agents: HashMap<i64, Entity<terminal::Terminal>>,
-    /// The group whose agent shows in the panel under the PRs, while that
-    /// group is the one selected.
-    agent_panel: Option<i64>,
+    /// Whether the agent panel is open. It shows the selected group's agent,
+    /// following the selection, and hides while the group has none.
+    agent_open: bool,
     /// The panel's height once the user dragged its edge; until then a share
     /// of the window's.
     agent_height: Option<f32>,
@@ -400,7 +400,7 @@ impl Root {
             sidebar_width: SIDEBAR_WIDTH,
             opening_agent: None,
             agents: HashMap::new(),
-            agent_panel: None,
+            agent_open: false,
             agent_height: None,
             threads_open: HashSet::new(),
             board_scroll: gpui::ScrollHandle::new(),
@@ -586,7 +586,7 @@ impl Root {
             return;
         };
         if self.shown_agent() == Some(root) {
-            self.agent_panel = None;
+            self.agent_open = false;
             window.focus(&self.focus_handle);
             cx.notify();
             return;
@@ -618,7 +618,7 @@ impl Root {
             self.filter = Filter::Folder(root);
         }
         if let Some(agent) = running {
-            self.agent_panel = Some(root);
+            self.agent_open = true;
             window.focus(&agent.focus_handle(cx));
             then(self, &agent, cx);
             cx.notify();
@@ -648,7 +648,7 @@ impl Root {
                     Ok(started) => {
                         let agent = cx.new(|cx| terminal::Terminal::new(started, cx));
                         this.agents.insert(root, agent.clone());
-                        this.agent_panel = Some(root);
+                        this.agent_open = true;
                         window.focus(&agent.focus_handle(cx));
                         then(this, &agent, cx);
                     }
@@ -795,7 +795,7 @@ impl Root {
                             "Cerrar",
                             true,
                             cx.listener(|this, _event, window, cx| {
-                                this.agent_panel = None;
+                                this.agent_open = false;
                                 window.focus(&this.focus_handle);
                                 cx.notify();
                             }),
@@ -1035,14 +1035,14 @@ impl Root {
             )
     }
 
-    /// The group whose agent the panel shows now: the one asked for, if it is
-    /// the selected group or the selected subgroup's.
+    /// The group whose agent the panel shows now: the selected group's, or
+    /// the selected subgroup's, while the panel is open and it has one.
     fn shown_agent(&self) -> Option<i64> {
         let Filter::Folder(id) = self.filter else {
             return None;
         };
         let root = self.folders.root(id)?.id;
-        (self.agent_panel == Some(root)).then_some(root)
+        (self.agent_open && self.agents.contains_key(&root)).then_some(root)
     }
 
     fn load_sidebar_width(cx: &mut Context<Self>) {
