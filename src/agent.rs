@@ -1,27 +1,25 @@
 //! Each group's agent: a Claude Code session in the app's terminal panel,
 //! working from a folder of its own with every repo of `~/code` readable.
 //!
-//! The agent plans in its folder and makes the changes in Orca worktrees it
-//! tags with the group (`--comment gh-pr-status:group=<id>`). Orca refuses a
-//! parent worktree from another repo, so the tag is what ties a worktree to its
-//! group; the PRs opened from tagged branches join the group on their own.
-//! Subgroups share their group's agent: the app lists their tags in
-//! `subgrupos.md`, so the agent tags each worktree with the subgroup it is for.
-//! Everything here blocks and runs on the background executor.
+//! The agent plans in its folder and makes the changes in git worktrees whose
+//! branch it tags with the group (see `worktree`); the PRs opened from tagged
+//! branches join the group on their own. Subgroups share their group's agent:
+//! the app lists their numbers in `subgrupos.md`, so the agent tags each branch
+//! with the subgroup it is for. Everything here blocks and runs on the
+//! background executor.
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::Value;
-
-use crate::folders::{self, Folder, Folders};
+use crate::folders::{self, Folder};
 use crate::github::PullRequest;
 use crate::settings;
 use crate::tool;
+use crate::worktree::GROUP_KEY;
 
-/// What a worktree's Orca comment starts with when it belongs to a group.
-const TAG: &str = "gh-pr-status:group=";
+/// Where new worktrees go, as the agent's shell writes it.
+const WORKSPACES: &str = "~/orca/workspaces";
 /// Where the repos are cloned when `GH_PR_STATUS_CODE_DIR` doesn't say.
 const CODE_DIR: &str = "code";
 /// Where the groups' folders go, under the home folder.
@@ -33,18 +31,9 @@ const SUBGROUPS_SECTION: &str = "
 ## Subgrupos
 
 El grupo se puede dividir en subgrupos, listados en `subgrupos.md` (lo mantiene gh-pr-status). \
-Antes de crear un worktree, léelo y usa en `--comment` la marca del subgrupo al que pertenece el \
-trabajo; si ninguno calza, usa la del grupo. Así cada PR aparece en su subgrupo.
+Antes de crear un worktree, léelo y marca la rama con el número del subgrupo al que pertenece el \
+trabajo; si ninguno calza, usa el del grupo. Así cada PR aparece en su subgrupo.
 ";
-
-/// An Orca worktree tagged with a group.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Worktree {
-    /// `owner/name`, lowercased as Orca keeps it.
-    pub repo: String,
-    pub branch: String,
-    pub folder: i64,
-}
 
 /// Where a group's agent runs and what starts it.
 pub struct Launch {
@@ -63,6 +52,20 @@ pub fn agent_launch(folder: &Folder, subgroups: &[Folder]) -> Result<Launch, Str
         command.push_str(" --continue");
     }
     Ok(Launch { dir, command })
+}
+
+/// Claude Code in a worktree, back in its last conversation there if it had
+/// one.
+pub fn claude_launch(dir: &Path) -> Result<Launch, String> {
+    let command = if has_conversation(dir)? {
+        "claude --continue"
+    } else {
+        "claude"
+    };
+    Ok(Launch {
+        dir: dir.to_path_buf(),
+        command: command.to_string(),
+    })
 }
 
 /// Whether Claude Code kept a conversation from `dir`, under the folder it
@@ -139,16 +142,16 @@ pub fn task_prompt(pull: &PullRequest, task: &str, folder: &Folder, code: &str) 
         }
         prompt.push('.');
     }
+    let repo = format!("{code}/{}", pull.repo_name());
     prompt.push_str(&format!(
-        " Trabaja en el worktree de Orca que tenga esa rama (`orca worktree list --json`). Si no hay \
-ninguno, créalo con `orca worktree create --repo path:{code}/{} --name {} --comment \"{TAG}{}\" \
---setup skip --json` y cámbialo a la rama con `git fetch origin {} && git checkout {}`. Al terminar, \
-haz push y avísame.",
-        pull.repo_name(),
-        pull.head.rsplit('/').next().unwrap_or(&pull.head),
-        folder.id,
-        pull.head,
-        pull.head
+        " Trabaja en el worktree que tenga esa rama (`git -C {repo} worktree list`). Si no hay \
+ninguno, créalo con `git -C {repo} fetch origin {head} && git -C {repo} worktree add \
+{WORKSPACES}/{name}/{dir} {head}` y márcalo con el grupo: `git -C {repo} config \
+branch.{head}.{GROUP_KEY} {id}`. Al terminar, haz push y avísame.",
+        head = pull.head,
+        name = pull.repo_name(),
+        dir = pull.head.replace('/', "-"),
+        id = folder.id,
     ));
     prompt
 }
@@ -163,65 +166,8 @@ pub fn sync_subgroups(folder: &Folder, subgroups: &[Folder]) -> Result<(), Strin
     }
 }
 
-/// Every Orca worktree tagged with a group.
-pub fn worktrees() -> Result<Vec<Worktree>, String> {
-    orca(&["worktree", "list"]).map(|result| parse_worktrees(&result))
-}
-
-/// The open PRs that should join a group because their branch is a tagged
-/// worktree's: those in no group yet, never claimed before, whose group still
-/// exists.
-pub fn claims(
-    pulls: &[PullRequest],
-    worktrees: &[Worktree],
-    folders: &Folders,
-) -> Vec<(String, i64)> {
-    pulls
-        .iter()
-        .filter(|pull| {
-            !folders.by_url.contains_key(&pull.url) && !folders.claimed.contains(&pull.url)
-        })
-        .filter_map(|pull| {
-            let worktree = worktrees.iter().find(|worktree| {
-                worktree.repo.eq_ignore_ascii_case(&pull.repo) && worktree.branch == pull.head
-            })?;
-            folders
-                .list
-                .iter()
-                .any(|folder| folder.id == worktree.folder)
-                .then(|| (pull.url.clone(), worktree.folder))
-        })
-        .collect()
-}
-
-fn parse_worktrees(result: &Value) -> Vec<Worktree> {
-    result["worktrees"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|worktree| {
-            let folder = worktree["comment"]
-                .as_str()?
-                .trim()
-                .strip_prefix(TAG)?
-                .parse()
-                .ok()?;
-            let repo = worktree["projectId"].as_str()?.strip_prefix("github:")?;
-            let branch = worktree["branch"].as_str()?;
-            Some(Worktree {
-                repo: repo.to_string(),
-                branch: branch
-                    .strip_prefix("refs/heads/")
-                    .unwrap_or(branch)
-                    .to_string(),
-                folder,
-            })
-        })
-        .collect()
-}
-
-/// The group's folder, made the first time: a git repo, since Orca only takes
-/// those, holding the `CLAUDE.md` the agent starts from.
+/// The group's folder, made the first time: a git repo, as Orca wants to
+/// open it, holding the `CLAUDE.md` the agent starts from.
 fn agent_dir(folder: &Folder) -> Result<PathBuf, String> {
     if let Some(dir) = folders::agent_dir(folder.id)? {
         let dir = PathBuf::from(dir);
@@ -259,20 +205,47 @@ fn write_subgroups_file(dir: &Path, folder: &Folder, subgroups: &[Folder]) -> Re
 
     let claude = dir.join("CLAUDE.md");
     let text = std::fs::read_to_string(&claude).unwrap_or_default();
-    if !text.contains(SUBGROUPS_FILE) {
-        std::fs::write(&claude, format!("{}\n{SUBGROUPS_SECTION}", text.trim_end()))
-            .map_err(error)?;
+    let mut updated = without_orca(&text, &code_dir()?, folder.id);
+    if !updated.contains(SUBGROUPS_FILE) {
+        updated = format!("{}\n{SUBGROUPS_SECTION}", updated.trim_end());
+    }
+    if updated != text {
+        std::fs::write(&claude, updated).map_err(error)?;
     }
     Ok(())
 }
 
+/// A `CLAUDE.md` from when worktrees were made with Orca, told to make them
+/// with git instead; any other text comes back as it was.
+fn without_orca(text: &str, code: &str, id: i64) -> String {
+    let mut text = text
+        .replace(
+            "El código se cambia en worktrees de Orca,",
+            "El código se cambia en worktrees,",
+        )
+        .replace(
+            "usa en `--comment` la marca del subgrupo al que pertenece el trabajo; si ninguno calza, usa la del grupo.",
+            "marca la rama con el número del subgrupo al que pertenece el trabajo; si ninguno calza, usa el del grupo.",
+        );
+    let start = text.find(HOW_TO_HEADING);
+    let end = text.find(WORKTREES_HEADING);
+    if let (Some(start), Some(end)) = (start, end)
+        && start < end
+        && text[start..end].contains("orca worktree create")
+    {
+        text.replace_range(start..end, &how_to(code, id));
+    }
+    text
+}
+
 fn subgroups_md(folder: &Folder, subgroups: &[Folder]) -> String {
-    let line = |name: &str, id: i64| format!("- {name}: `{TAG}{id}`\n");
+    let line = |name: &str, id: i64| format!("- {name}: `{id}`\n");
     let mut text = format!(
         "# Subgrupos de \"{}\"
 
-Lo mantiene gh-pr-status; no lo edites. Al crear un worktree, usa en `--comment` la marca del \
-subgrupo al que pertenece el trabajo, y sus PRs aparecerán en ese subgrupo.
+Lo mantiene gh-pr-status; no lo edites. Al crear un worktree, marca su rama con el número del \
+subgrupo al que pertenece el trabajo (`git config branch.<rama>.{GROUP_KEY} <número>`), y sus PRs \
+aparecerán en ese subgrupo.
 
 ",
         folder.name
@@ -290,12 +263,41 @@ subgrupo al que pertenece el trabajo, y sus PRs aparecerán en ese subgrupo.
     text
 }
 
+const HOW_TO_HEADING: &str = "## Cómo trabajar en un repo";
+const WORKTREES_HEADING: &str = "## Worktrees";
+
+/// The `CLAUDE.md` section on making a worktree, up to the list of them.
+fn how_to(code: &str, id: i64) -> String {
+    format!(
+        "{HOW_TO_HEADING}
+
+1. Crea el worktree en `{WORKSPACES}/<repo>/<nombre-corto>`, con una rama según la convención de \
+Toku (`feat/`, `fix/`, `chore/`…) sobre la rama principal del repo:
+
+   ```
+   git -C {code}/<repo> fetch origin
+   git -C {code}/<repo> worktree add -b feat/<nombre-corto> {WORKSPACES}/<repo>/<nombre-corto> origin/<master o main>
+   ```
+
+2. Marca la rama con el grupo (o con su subgrupo, ver \"Subgrupos\"), para que sus PRs aparezcan \
+solos en gh-pr-status:
+
+   ```
+   git -C {code}/<repo> config branch.feat/<nombre-corto>.{GROUP_KEY} {id}
+   ```
+
+3. Anota el repo, la rama y el path en la sección \"Worktrees\".
+
+"
+    )
+}
+
 fn claude_md(folder: &Folder, code: &str) -> String {
     format!(
         "# Grupo: {name}
 
 Espacio de trabajo del grupo \"{name}\" de gh-pr-status. Aquí se conversa qué hay que hacer y en \
-qué repos. El código se cambia en worktrees de Orca, nunca en esta carpeta ni directo en `{code}`.
+qué repos. El código se cambia en worktrees, nunca en esta carpeta ni directo en `{code}`.
 
 ## Objetivo
 
@@ -306,26 +308,12 @@ Sin definir. Al empezar, pregúntale al usuario qué quiere lograr y anótalo aq
 Todos los repos de Toku están clonados en `{code}/<repo>`, y los puedes leer. Úsalos para \
 investigar y decidir qué repos hay que tocar.
 
-## Cómo trabajar en un repo
-
-1. Si el repo no está en Orca (`orca repo list`), regístralo: `orca repo add --path {code}/<repo>`.
-2. Crea el worktree marcado con el grupo (o con su subgrupo, ver \"Subgrupos\"), para que sus PRs \
-aparezcan solos en gh-pr-status:
-
-   ```
-   orca worktree create --repo path:{code}/<repo> --name <nombre-corto> --comment \"{TAG}{id}\" --setup skip --json
-   ```
-
-3. Orca nombra la rama `<usuario>/<nombre-corto>`. Renómbrala a la convención de Toku antes de \
-hacer commits: `git -C <path del worktree> branch -m feat/<nombre-corto>` (o `fix/`, `chore/`…).
-4. Anota el repo, la rama y el path en la sección \"Worktrees\".
-
-## Worktrees
+{how_to}## Worktrees
 
 Ninguno todavía.
 {SUBGROUPS_SECTION}",
         name = folder.name,
-        id = folder.id,
+        how_to = how_to(code, folder.id),
     )
 }
 
@@ -371,32 +359,6 @@ fn home() -> Result<PathBuf, String> {
         .ok_or_else(|| "No se encontró HOME".to_string())
 }
 
-/// Runs `orca <args> --json` and returns its `result`.
-fn orca(args: &[&str]) -> Result<Value, String> {
-    let output = Command::new(tool::path("orca"))
-        .args(args)
-        .arg("--json")
-        .output()
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => {
-                "No se encontró el comando orca. Instala Orca y su CLI.".to_string()
-            }
-            _ => format!("No se pudo ejecutar orca: {error}"),
-        })?;
-    let value: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        format!("orca terminó con error: {}", stderr.trim())
-    })?;
-    if value["ok"].as_bool() == Some(true) {
-        Ok(value["result"].clone())
-    } else {
-        Err(format!(
-            "orca terminó con error: {}",
-            value["error"]["message"].as_str().unwrap_or("sin detalle")
-        ))
-    }
-}
-
 fn git(dir: &Path, args: &[&str]) -> Result<(), String> {
     let output = Command::new(tool::path("git"))
         .arg("-C")
@@ -415,8 +377,6 @@ fn git(dir: &Path, args: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use serde_json::json;
 
     use crate::github::{Checks, Mergeable, Review};
 
@@ -444,61 +404,6 @@ mod tests {
         }
     }
 
-    fn worktree(comment: &str) -> Value {
-        json!({
-            "projectId": "github:toku-ia/databases",
-            "branch": "refs/heads/feat/pagos",
-            "comment": comment,
-        })
-    }
-
-    fn folders(ids: &[i64]) -> Folders {
-        Folders {
-            list: ids
-                .iter()
-                .map(|&id| Folder {
-                    id,
-                    name: format!("Grupo {id}"),
-                    parent: None,
-                })
-                .collect(),
-            ..Folders::default()
-        }
-    }
-
-    #[test]
-    fn only_worktrees_tagged_with_a_group_are_read() {
-        let result = json!({ "worktrees": [worktree("gh-pr-status:group=7"), worktree("notas")] });
-
-        let worktrees = parse_worktrees(&result);
-
-        assert_eq!(
-            worktrees,
-            [Worktree {
-                repo: "toku-ia/databases".to_string(),
-                branch: "feat/pagos".to_string(),
-                folder: 7,
-            }]
-        );
-    }
-
-    #[test]
-    fn a_pull_request_from_a_tagged_branch_joins_its_group_once() {
-        let pull = pull("Toku-IA/databases", "feat/pagos");
-        let worktrees =
-            parse_worktrees(&json!({ "worktrees": [worktree("gh-pr-status:group=7")] }));
-        let mut claimed = folders(&[7]);
-        claimed.claimed.insert(pull.url.clone());
-
-        let first = claims(std::slice::from_ref(&pull), &worktrees, &folders(&[7]));
-        let again = claims(std::slice::from_ref(&pull), &worktrees, &claimed);
-        let deleted = claims(std::slice::from_ref(&pull), &worktrees, &folders(&[8]));
-
-        assert_eq!(first, [(pull.url.clone(), 7)]);
-        assert!(again.is_empty());
-        assert!(deleted.is_empty());
-    }
-
     #[test]
     fn the_subgroups_file_lists_the_group_and_each_subgroup_tag() {
         let group = Folder {
@@ -514,8 +419,8 @@ mod tests {
 
         let text = subgroups_md(&group, &[front]);
 
-        assert!(text.contains("- Activaciones (el grupo completo): `gh-pr-status:group=4`"));
-        assert!(text.contains("- Front: `gh-pr-status:group=7`"));
+        assert!(text.contains("- Activaciones (el grupo completo): `4`"));
+        assert!(text.contains("- Front: `7`"));
     }
 
     #[test]
@@ -558,9 +463,24 @@ mod tests {
         assert!(prompt.starts_with("Arreglar CI: pytest en el PR #12 de Toku-IA/databases"));
         assert!(prompt.contains("Check fallido `pytest`: 3 failed (logs: https://ci/1)."));
         assert!(prompt.contains(
-            "--repo path:/code/databases --name pagos --comment \"gh-pr-status:group=4\""
+            "git -C /code/databases worktree add ~/orca/workspaces/databases/feat-pagos feat/pagos"
         ));
-        assert!(prompt.contains("git checkout feat/pagos"));
+        assert!(prompt.contains("config branch.feat/pagos.prmanagergroup 4"));
+    }
+
+    #[test]
+    fn an_orca_claude_md_learns_to_make_worktrees_with_git() {
+        let old = "# Grupo: Pagos\n\nEl código se cambia en worktrees de Orca, nunca aquí.\n\n\
+## Cómo trabajar en un repo\n\n1. orca worktree create --repo x\n\n## Worktrees\n\n- databases\n";
+
+        let new = without_orca(old, "/code", 4);
+        let again = without_orca(&new, "/code", 4);
+
+        assert!(!new.contains("orca worktree create"));
+        assert!(new.contains("El código se cambia en worktrees, nunca aquí."));
+        assert!(new.contains("config branch.feat/<nombre-corto>.prmanagergroup 4"));
+        assert!(new.ends_with("## Worktrees\n\n- databases\n"));
+        assert_eq!(again, new);
     }
 
     #[test]

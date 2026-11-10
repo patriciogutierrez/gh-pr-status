@@ -281,6 +281,11 @@ impl Terminal {
         self.sender.send(Msg::Input(bytes.into())).ok();
     }
 
+    /// Ends the terminal: its shell, and the program in it, get a hangup.
+    pub fn close(&self) {
+        self.sender.send(Msg::Shutdown).ok();
+    }
+
     /// What the agent in the terminal is doing, from its screen: Claude Code
     /// offers "esc to interrupt" only while it works.
     pub fn state(&self) -> AgentState {

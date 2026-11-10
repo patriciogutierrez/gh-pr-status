@@ -147,11 +147,17 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   botón **Agente** (o clic derecho → «Abrir agente») abre una terminal con
   `claude --add-dir ~/code` en la carpeta del grupo, para conversar qué hay que hacer y en qué
   repos; vuelve a la conversación anterior del grupo si la hay (`--continue`). El mismo botón
-  lo oculta, y la sesión sigue corriendo hasta
-  cerrar la app. Con el panel abierto, cambiar de grupo muestra el agente de ese grupo, y el
-  panel se esconde en un grupo sin agente. En la barra lateral, un punto junto al contador marca
-  los grupos con agente: amarillo mientras trabaja, verde cuando espera tu respuesta y gris si
-  su sesión terminó. Su altura se ajusta arrastrando el borde de arriba y se
+  («Ocultar panel») lo oculta, y las sesiones siguen corriendo hasta cerrar la app.
+- **Worktrees sin Orca**: el menú de un PR tiene «Claude en el worktree» y «Terminal en el
+  worktree», que abren Claude Code (con `--continue` si ya hubo conversación ahí) o una shell en
+  el worktree de su rama. Si no hay uno, lo crean en `~/orca/workspaces/<repo>/<rama>` desde el
+  repo de `~/code`, y Orca lo muestra cuando lo abras. «Borrar worktree» lo saca (pregunta antes,
+  cierra sus terminales y deja la rama); con cambios sin commit no lo borra. Cada terminal es
+  una pestaña del panel, con × para cerrarla. El panel lista las de lo elegido en la barra
+  lateral: un grupo, su agente y las de sus PRs; «Sin grupo», las de PRs sin grupo; «Todos»,
+  todas. En un grupo sin agente, «+ Agente» lo abre. En la barra lateral, un punto junto al
+  contador resume los Claude del grupo: amarillo si alguno trabaja, verde si esperan tu
+  respuesta y gris si terminaron. Su altura se ajusta arrastrando el borde de arriba y se
   recuerda. La terminal funciona como las de
   macOS: cmd-C copia lo seleccionado con el mouse (doble clic, una palabra; triple, la línea),
   cmd-V pega (sin texto en el portapapeles, Claude Code pega la imagen), cmd-clic abre un link,
@@ -160,12 +166,15 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   «Mantener caliente» y «Ocultar» de Claude Code, los clics y la rueda van a él; con shift u
   option se sigue seleccionando, y option-rueda recorre el historial. La primera vez crea la carpeta del grupo en
   `~/orca/groups/<grupo>/`, un repo git con un `CLAUDE.md` que le explica al agente cómo
-  trabajar. El agente crea un worktree de [Orca](https://github.com/stablyai/orca) por repo,
-  marcado con el grupo (`--comment gh-pr-status:group=<id>`), y los PRs que salgan de esas
-  ramas entran solos al grupo; para eso Orca tiene que estar corriendo. Si sacas uno a mano, no
-  vuelve a entrar. Los subgrupos comparten el agente de su grupo: la app mantiene en la carpeta
-  del grupo un `subgrupos.md` con la marca de cada uno, y el agente marca cada worktree con el
-  subgrupo al que pertenece, así sus PRs caen ahí. Los repos se buscan en `~/code`, o en la
+  trabajar. El agente crea con git un worktree por repo y marca su rama con el grupo
+  (`git config branch.<rama>.prmanagergroup <id>`); los PRs que salgan de esas ramas entran
+  solos al grupo, sin que Orca tenga que estar abierto. Si sacas uno a mano, no vuelve a entrar.
+  Los worktrees que el agente creó antes con [Orca](https://github.com/stablyai/orca)
+  (`--comment gh-pr-status:group=<id>`) reciben esa marca la próxima vez que la app recarga con
+  Orca abierto, y el `CLAUDE.md` de cada grupo se actualiza solo al abrir su agente. Los
+  subgrupos comparten el agente de su grupo: la app mantiene en la carpeta del grupo un
+  `subgrupos.md` con el número de cada uno, y el agente marca cada rama con el subgrupo al que
+  pertenece, así sus PRs caen ahí. Los repos se buscan en `~/code`, o en la
   carpeta de repos de Ajustes. La primera vez, Claude Code pregunta si confías en la carpeta
   del grupo. Al eliminar un grupo, su carpeta queda en disco.
 - Cada fila lleva en color su **siguiente acción**: lo primero que la traba (deploy fallido,
@@ -319,7 +328,8 @@ cargo clippy --all-targets
 | `src/github.rs` | La consulta GraphQL vía `gh`, el parseo de la respuesta y las fechas |
 | `src/pipeline.rs` | La configuración del bot y el parseo de sus comentarios: etapas, horas, errores y estado |
 | `src/folders.rs` | Los grupos de PRs y a cuál pertenece cada uno, en SQLite |
-| `src/orca.rs` | La carpeta y el comando del agente de cada grupo, y los worktrees de Orca marcados con su grupo |
+| `src/agent.rs` | La carpeta, el `CLAUDE.md` y el comando del agente de cada grupo, y lo que se le pide |
+| `src/worktree.rs` | Los worktrees de los repos de `~/code`: listarlos, crearlos, borrarlos y su grupo |
 | `src/terminal.rs` | La terminal del panel del agente: la pseudoterminal, el emulador de Alacritty, el dibujo y el teclado |
 | `src/db.rs` | Dónde se abren los archivos SQLite locales |
 | `src/merged.rs` | Los PRs mergeados: la búsqueda en GitHub, el registro en SQLite y los días en hora local |
