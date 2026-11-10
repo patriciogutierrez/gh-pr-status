@@ -85,9 +85,10 @@ const SIDEBAR_MIN: f32 = 140.;
 const SIDEBAR_MAX: f32 = 480.;
 /// The strip between the sidebar and the PRs that resizes the sidebar.
 const HANDLE_WIDTH: f32 = 16.;
-/// The room a sidebar entry's count takes; with padding, border and gap it
-/// leaves the rest of the sidebar's width to the name.
-const COUNT_WIDTH: f32 = 20.;
+/// The room a sidebar entry's count takes, with the dot of the group's agent
+/// before it; with padding, border and gap it leaves the rest of the
+/// sidebar's width to the name.
+const COUNT_WIDTH: f32 = 32.;
 const ENTRY_CHROME: f32 = 2. * 8. + 2. + 8. + COUNT_WIDTH;
 /// The room a group's fold arrow takes, with the gap after it.
 const FOLD_WIDTH: f32 = 12. + 8.;
@@ -2006,9 +2007,17 @@ impl Root {
                     .w(px(COUNT_WIDTH))
                     .flex_shrink_0()
                     .flex()
+                    .items_center()
                     .justify_end()
+                    .gap_1()
                     .text_xs()
                     .text_color(rgb(theme::MUTED))
+                    .when_some(
+                        entry
+                            .filter(|folder| folder.parent.is_none())
+                            .and_then(|folder| self.agents.get(&folder.id)),
+                        |this, agent| this.child(agent_dot(agent.read(cx).state())),
+                    )
                     .child(count.to_string()),
             )
             .when_some(folder, |this, id| {
@@ -3565,6 +3574,21 @@ impl Render for Root {
                 "clic en el título abre el PR · ⋯ o clic derecho: acciones · arrástralo a un grupo · cmd-r actualiza · cmd-1/2 pestañas · cmd-, ajustes",
             ))
     }
+}
+
+/// The dot by a group with an agent: yellow while it works, green while it
+/// waits for the user, gray once its session ended.
+fn agent_dot(state: terminal::AgentState) -> impl IntoElement {
+    let color = match state {
+        terminal::AgentState::Working => theme::YELLOW,
+        terminal::AgentState::Waiting => theme::GREEN,
+        terminal::AgentState::Ended => theme::MUTED,
+    };
+    div()
+        .size(px(6.))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(rgb(color))
 }
 
 fn main() {

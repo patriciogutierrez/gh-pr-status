@@ -149,7 +149,9 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   repos; vuelve a la conversación anterior del grupo si la hay (`--continue`). El mismo botón
   lo oculta, y la sesión sigue corriendo hasta
   cerrar la app. Con el panel abierto, cambiar de grupo muestra el agente de ese grupo, y el
-  panel se esconde en un grupo sin agente. Su altura se ajusta arrastrando el borde de arriba y se
+  panel se esconde en un grupo sin agente. En la barra lateral, un punto junto al contador marca
+  los grupos con agente: amarillo mientras trabaja, verde cuando espera tu respuesta y gris si
+  su sesión terminó. Su altura se ajusta arrastrando el borde de arriba y se
   recuerda. La terminal funciona como las de
   macOS: cmd-C copia lo seleccionado con el mouse (doble clic, una palabra; triple, la línea),
   cmd-V pega (sin texto en el portapapeles, Claude Code pega la imagen), cmd-clic abre un link,

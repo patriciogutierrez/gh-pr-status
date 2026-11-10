@@ -111,6 +111,16 @@ impl EventListener for Listener {
     }
 }
 
+/// What a group's agent is doing.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AgentState {
+    Working,
+    /// Done with what it was asked, or not asked yet.
+    Waiting,
+    /// The shell is gone.
+    Ended,
+}
+
 /// A shell started for a [`Terminal`], before the view takes it.
 pub struct Started {
     term: Arc<FairMutex<Term<Listener>>>,
@@ -269,6 +279,22 @@ impl Terminal {
     /// Sends `bytes` to the program as if typed.
     pub fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
         self.sender.send(Msg::Input(bytes.into())).ok();
+    }
+
+    /// What the agent in the terminal is doing, from its screen: Claude Code
+    /// offers "esc to interrupt" only while it works.
+    pub fn state(&self) -> AgentState {
+        if self.exited {
+            AgentState::Ended
+        } else if self
+            .screen()
+            .iter()
+            .any(|line| line.contains("esc to interrupt"))
+        {
+            AgentState::Working
+        } else {
+            AgentState::Waiting
+        }
     }
 
     /// The text on screen, one string per line.
