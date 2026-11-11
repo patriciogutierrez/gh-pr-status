@@ -111,25 +111,6 @@ pub fn create(code: &Path, pull: &PullRequest, folder: Option<i64>) -> Result<Pa
     Ok(path)
 }
 
-/// Removes the worktree's folder, refusing one with uncommitted changes. Its
-/// branch stays.
-pub fn remove(worktree: &Worktree) -> Result<(), String> {
-    if worktree.main {
-        return Err("Es el checkout del repo, no un worktree.".to_string());
-    }
-    let path = worktree.path.to_string_lossy().to_string();
-    git(&worktree.path, &["worktree", "remove", &path]).map_err(|error| {
-        if error.contains("modified or untracked") {
-            format!(
-                "{} tiene cambios sin commit; no se borró.",
-                worktree.path.display()
-            )
-        } else {
-            error
-        }
-    })
-}
-
 /// The open PRs that should join a group because their branch is a tagged
 /// worktree's: those in no group yet, never claimed before, whose group still
 /// exists.
