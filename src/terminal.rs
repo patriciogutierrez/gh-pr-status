@@ -150,7 +150,7 @@ pub fn start(dir: &Path, command: &str) -> Result<Started, String> {
                     "-l".to_string(),
                     "-i".to_string(),
                     "-c".to_string(),
-                    format!("{}{command}; exec {shell} -l", unset_claude()),
+                    format!("{}{command}; exec {shell} -l", unset_inherited()),
                 ],
             )),
             working_directory: Some(dir.to_path_buf()),
@@ -185,12 +185,24 @@ pub fn start(dir: &Path, command: &str) -> Result<Started, String> {
     }
 }
 
-/// Drops the variables a Claude Code session leaves to its children, so an
-/// app started from one doesn't hand its agent a session that isn't its own.
-fn unset_claude() -> String {
+/// Whether a variable came from the terminal the app was launched from and
+/// must not reach the panel's programs: Claude Code's own, which would make a
+/// nested session misbehave, and Orca's, which send Claude's notifications
+/// to Orca's pane instead of here.
+fn inherited_by_mistake(name: &str) -> bool {
+    name.starts_with("CLAUDE")
+        || name.starts_with("ORCA_")
+        || matches!(
+            name,
+            "OPENCODE_CONFIG_DIR" | "TERM_PROGRAM" | "TERM_PROGRAM_VERSION"
+        )
+}
+
+/// The `unset` that drops those variables before the program starts.
+fn unset_inherited() -> String {
     let inherited: Vec<String> = std::env::vars()
         .map(|(name, _)| name)
-        .filter(|name| name.starts_with("CLAUDE"))
+        .filter(|name| inherited_by_mistake(name))
         .collect();
     if inherited.is_empty() {
         String::new()
@@ -279,6 +291,11 @@ impl Terminal {
     /// Sends `bytes` to the program as if typed.
     pub fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
         self.sender.send(Msg::Input(bytes.into())).ok();
+    }
+
+    /// Ends the terminal: its shell, and the program in it, get a hangup.
+    pub fn close(&self) {
+        self.sender.send(Msg::Shutdown).ok();
     }
 
     /// What the agent in the terminal is doing, from its screen: Claude Code
@@ -1169,6 +1186,13 @@ mod tests {
     fn a_paste_keeps_its_lines_and_is_marked_when_asked() {
         assert_eq!(paste_bytes("a\nb", false), b"a\rb");
         assert_eq!(paste_bytes("a\r\nb", true), b"\x1b[200~a\rb\x1b[201~");
+    }
+
+    #[test]
+    fn orca_and_claude_variables_stay_out_of_the_panel() {
+        assert!(inherited_by_mistake("ORCA_PANE_KEY"));
+        assert!(inherited_by_mistake("CLAUDE_CODE_MESSAGING_TOKEN"));
+        assert!(!inherited_by_mistake("PATH"));
     }
 
     #[test]
