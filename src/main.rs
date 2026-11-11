@@ -173,6 +173,18 @@ struct Session {
     dir: PathBuf,
     label: SharedString,
     terminal: Entity<terminal::Terminal>,
+    /// What Claude was last seen doing, to notice when it stops to wait.
+    state: terminal::AgentState,
+    /// Keeps `state` following the terminal.
+    _watch: gpui::Subscription,
+}
+
+/// What a new tab is, before its terminal starts.
+struct NewSession {
+    kind: SessionKind,
+    group: Option<i64>,
+    dir: PathBuf,
+    label: SharedString,
 }
 
 /// Which PRs the sidebar lets through to the tabs.
@@ -702,11 +714,14 @@ impl Root {
                         let terminal = cx.new(|cx| terminal::Terminal::new(started, cx));
                         let id = this.add_session(
                             existing.map(|(id, _)| id),
-                            SessionKind::Agent,
-                            Some(root),
-                            dir,
-                            label,
+                            NewSession {
+                                kind: SessionKind::Agent,
+                                group: Some(root),
+                                dir,
+                                label,
+                            },
                             terminal.clone(),
+                            cx,
                         );
                         this.show_session(id, window, cx);
                         then(this, &terminal, cx);
@@ -824,7 +839,17 @@ impl Root {
                 match started {
                     Ok((dir, started)) => {
                         let terminal = cx.new(|cx| terminal::Terminal::new(started, cx));
-                        let id = this.add_session(replaced, kind, group, dir, label, terminal);
+                        let id = this.add_session(
+                            replaced,
+                            NewSession {
+                                kind,
+                                group,
+                                dir,
+                                label,
+                            },
+                            terminal,
+                            cx,
+                        );
                         if !this
                             .sessions
                             .iter()
@@ -848,16 +873,26 @@ impl Root {
     fn add_session(
         &mut self,
         replaced: Option<u64>,
-        kind: SessionKind,
-        group: Option<i64>,
-        dir: PathBuf,
-        label: SharedString,
+        new: NewSession,
         terminal: Entity<terminal::Terminal>,
+        cx: &mut Context<Self>,
     ) -> u64 {
+        let NewSession {
+            kind,
+            group,
+            dir,
+            label,
+        } = new;
+        let watch = cx.observe(&terminal, |this, terminal, cx| {
+            this.watch_session(&terminal, cx)
+        });
+        let state = terminal.read(cx).state();
         if let Some(session) =
             replaced.and_then(|id| self.sessions.iter_mut().find(|session| session.id == id))
         {
             session.terminal = terminal;
+            session.state = state;
+            session._watch = watch;
             return session.id;
         }
         let id = self.next_session;
@@ -869,6 +904,8 @@ impl Root {
             dir,
             label,
             terminal,
+            state,
+            _watch: watch,
         };
         // The agent goes first among its group's tabs.
         let at = if kind == SessionKind::Agent {
@@ -881,6 +918,39 @@ impl Root {
         };
         self.sessions.insert(at, session);
         id
+    }
+
+    /// Notifies when a Claude session stops working to wait for the user,
+    /// unless the app is in front showing it; the click brings the app
+    /// forward.
+    fn watch_session(&mut self, terminal: &Entity<terminal::Terminal>, cx: &mut Context<Self>) {
+        let state = terminal.read(cx).state();
+        let shown = self.shown_session().map(|session| session.id);
+        let in_front = cx.active_window().is_some();
+        let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| &session.terminal == terminal)
+        else {
+            return;
+        };
+        let stopped = session.state == terminal::AgentState::Working
+            && state == terminal::AgentState::Waiting;
+        session.state = state;
+        if !stopped || session.kind == SessionKind::Shell || (in_front && shown == Some(session.id))
+        {
+            return;
+        }
+        let notice = notify::Notice {
+            title: "Claude espera tu respuesta".to_string(),
+            subtitle: session.label.to_string(),
+            body: terminal.read(cx).title.clone().unwrap_or_default(),
+            url: String::new(),
+        };
+        cx.background_executor()
+            .spawn(async move { notify::send(&notice) })
+            .detach();
+        cx.notify();
     }
 
     /// Opens the panel on the terminal, focused.
