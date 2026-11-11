@@ -62,9 +62,13 @@ pub const GCP_PREPROD: &str = "GH_PR_STATUS_GCP_PREPROD";
 pub const GCP_PROD: &str = "GH_PR_STATUS_GCP_PROD";
 pub const GCP_DEVELOPMENT: &str = "GH_PR_STATUS_GCP_DEVELOPMENT";
 pub const CODE_DIR: &str = "GH_PR_STATUS_CODE_DIR";
+pub const COLUMN_WIDTH: &str = "GH_PR_STATUS_COLUMN_WIDTH";
+
+/// The narrowest and widest a board column can be set, in pixels.
+pub const COLUMN_WIDTHS: std::ops::RangeInclusive<f32> = 200.0..=800.0;
 
 /// Every setting, in the order the window lists them.
-pub const ALL: [Setting; 12] = [
+pub const ALL: [Setting; 13] = [
     setting(SLACK_USER, "Tu ID de Slack", "Va como quien pide la review"),
     secret(
         REVIEW_WEBHOOK,
@@ -112,6 +116,11 @@ pub const ALL: [Setting; 12] = [
         CODE_DIR,
         "Carpeta de repos",
         "Donde están clonados los repos del agente; por defecto ~/code",
+    ),
+    setting(
+        COLUMN_WIDTH,
+        "Ancho de las columnas",
+        "Píxeles de cada columna del tablero de un grupo, de 200 a 800; por defecto 300",
     ),
 ];
 

@@ -59,6 +59,7 @@ set -a; source .env; set +a; cargo run --release   # una vez; después basta con
 | `GH_PR_STATUS_GCP_DEVELOPMENT` | Proyecto de GCP de development | `acme-dev` |
 | `GH_PR_STATUS_SLACK_CHANNEL` | ID del canal de Slack donde inicias tu workflow (por ejemplo, pedir review). Agrega «Solicitar review» al menú de cada PR | `C0123456789` |
 | `GH_PR_STATUS_CODE_DIR` | Dónde están clonados los repos que lee el agente de cada grupo. Por defecto, `~/code` | `~/code` |
+| `GH_PR_STATUS_COLUMN_WIDTH` | Ancho en píxeles de cada columna del tablero de un grupo, de 200 a 800. Por defecto, 300 | `360` |
 | `GH_PR_STATUS_REVIEW_WEBHOOK` | URL del webhook del workflow de review de Slack (`hooks.slack.com/triggers/…`). Habilita el formulario «Solicitar review» | `https://hooks.slack.com/triggers/T…/…/…` |
 | `GH_PR_STATUS_SLACK_USER` | Tu ID de usuario de Slack, que va como requester | `U0123456789` |
 | `GH_PR_STATUS_REVIEWERS` | Los reviewers del formulario, como `Nombre:IDdeSlack` o `Nombre:IDdeSlack:loginDeGitHub` separados por coma. Con el login, el pedido también lo asigna como reviewer en GitHub | `Ana:U01:ana-gh,Beto:U02` |
