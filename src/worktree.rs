@@ -337,6 +337,13 @@ fn orca(args: &[&str]) -> Option<Value> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    // Read while it runs: a list bigger than the pipe would otherwise block
+    // Orca until the wait gives up.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut stdout, &mut bytes).map(|_| bytes)
+    });
     let started = Instant::now();
     loop {
         match child.try_wait() {
@@ -351,8 +358,8 @@ fn orca(args: &[&str]) -> Option<Value> {
             }
         }
     }
-    let output = child.wait_with_output().ok()?;
-    let value: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let bytes = reader.join().ok()?.ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
     (value["ok"].as_bool() == Some(true)).then(|| value["result"].clone())
 }
 
