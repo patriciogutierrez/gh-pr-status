@@ -149,11 +149,9 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   `claude --add-dir ~/code` en la carpeta del grupo, para conversar qué hay que hacer y en qué
   repos; vuelve a la conversación anterior del grupo si la hay (`--continue`). El mismo botón
   («Ocultar panel») lo oculta, y las sesiones siguen corriendo hasta cerrar la app.
-- **Worktrees sin Orca**: el menú de un PR tiene «Claude en el worktree» y «Terminal en el
-  worktree», que abren Claude Code (con `--continue` si ya hubo conversación ahí) o una shell en
-  el worktree de su rama. Si no hay uno, lo crean en `~/orca/workspaces/<repo>/<rama>` desde el
-  repo de `~/code`, y Orca lo muestra cuando lo abras. «Borrar worktree» lo saca (pregunta antes,
-  cierra sus terminales y deja la rama); con cambios sin commit no lo borra. Cada terminal es
+- **Worktrees sin Orca**: «Terminal» en el menú de un PR abre una shell en el worktree de su
+  rama. Si no hay uno, lo crea en `~/orca/workspaces/<repo>/<rama>` desde el repo de `~/code`, y
+  Orca lo muestra cuando lo abras. Cada terminal es
   una pestaña del panel, con × para cerrarla. El panel lista las de lo elegido en la barra
   lateral: un grupo, su agente y las de sus PRs; «Sin grupo», las de PRs sin grupo; «Todos»,
   todas. En un grupo sin agente, «+ Agente» lo abre. En la barra lateral, un punto junto al
@@ -214,11 +212,11 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   hora, todos los errores (servicio y causa) y un botón para abrir el comentario.
 - **Clic en el título** abre el PR en el navegador.
 - **El menú del PR**, con el «⋯» que aparece al pasar el mouse o con clic derecho, reúne sus
-  acciones, en este orden: copiar la URL, copiar la rama, ver el pedido en Slack, deploy,
-  solicitar review,
+  acciones, en este orden: copiar la URL, copiar la rama, abrir una terminal en su worktree, ver el
+  pedido en Slack («Slack»), deploy, solicitar review,
   marcar un borrador listo para review (`gh pr ready`), pedir al agente (salvo cuando lo que
-  falta es responder hilos de review), ver los logs de cada check fallido (menos docs-check) y
-  sacarlo del grupo.
+  falta es responder hilos de review), y ver los logs de cada check fallido (menos docs-check).
+  Para sacarlo de un grupo, arrástralo a «Sin grupo».
 - **Solicitar review** abre un formulario en una ventana aparte: reviewer (de la lista de
   `GH_PR_STATUS_REVIEWERS`; al abrir la lista se puede escribir para filtrarla, sin importar
   mayúsculas ni tildes, y enter elige la primera coincidencia), urgencia (highest, high,
@@ -231,7 +229,7 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   `GH_PR_STATUS_SLACK_TOKEN` (un token de usuario con `channels:history` y `groups:history`),
   la app busca unos segundos después el mensaje que publicó el workflow, y desde ahí «Ver
   pedido en Slack» abre el hilo exacto, la fila suma «N respuestas en Slack» y cada respuesta
-  nueva llega como notificación de macOS. Sin token, «Ver pedido en Slack» abre el canal. Necesita `GH_PR_STATUS_REVIEW_WEBHOOK`, `GH_PR_STATUS_SLACK_USER`,
+  nueva llega como notificación de macOS. Sin token, «Slack» abre el canal. Necesita `GH_PR_STATUS_REVIEW_WEBHOOK`, `GH_PR_STATUS_SLACK_USER`,
   `GH_PR_STATUS_REVIEWERS` y `GH_PR_STATUS_REVIEW_CHANNELS`; sin ellas, y con
   `GH_PR_STATUS_SLACK_CHANNEL`, el menú vuelve a copiar el link y abrir el canal. El
   comentario es un campo de texto de verdad: cursor, selección con shift+flechas, cmd+flechas

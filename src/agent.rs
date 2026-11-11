@@ -54,20 +54,6 @@ pub fn agent_launch(folder: &Folder, subgroups: &[Folder]) -> Result<Launch, Str
     Ok(Launch { dir, command })
 }
 
-/// Claude Code in a worktree, back in its last conversation there if it had
-/// one.
-pub fn claude_launch(dir: &Path) -> Result<Launch, String> {
-    let command = if has_conversation(dir)? {
-        "claude --continue"
-    } else {
-        "claude"
-    };
-    Ok(Launch {
-        dir: dir.to_path_buf(),
-        command: command.to_string(),
-    })
-}
-
 /// Whether Claude Code kept a conversation from `dir`, under the folder it
 /// names after the path with every other character a dash.
 fn has_conversation(dir: &Path) -> Result<bool, String> {

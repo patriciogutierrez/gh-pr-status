@@ -5,8 +5,8 @@
 //! bot reports it. A sidebar holds the groups the user drags PRs into; picking
 //! one narrows every tab to it. Each group has an agent, Claude Code in a panel
 //! under the PRs, and the PRs from the worktrees it makes join the group on
-//! their own. A PR's worktree can hold its own Claude Code and shell, as more
-//! tabs in the panel.
+//! their own. A PR's worktree can hold its own shell, as another tab in the
+//! panel.
 //!
 //! The open PRs reload every minute; while one of the user's deploys is running,
 //! "Mis PRs" reloads every 20 seconds so the run can be followed live. macOS
@@ -157,8 +157,6 @@ struct Menu {
 enum SessionKind {
     /// The group's agent, in the group's folder.
     Agent,
-    /// Claude Code in a PR's worktree.
-    Claude,
     /// A plain shell in a PR's worktree.
     Shell,
 }
@@ -735,7 +733,7 @@ impl Root {
         .detach();
     }
 
-    /// Opens Claude Code or a shell in the PR's worktree, making the worktree
+    /// Opens a shell in the PR's worktree, making the worktree
     /// the first time; one already open there comes to the front.
     fn open_in_worktree(
         &mut self,
@@ -816,12 +814,9 @@ impl Root {
                             (dir, Some(created))
                         }
                     };
-                    let launch = match kind {
-                        SessionKind::Shell => agent::Launch {
-                            dir: dir.clone(),
-                            command: "true".to_string(),
-                        },
-                        _ => agent::claude_launch(&dir)?,
+                    let launch = agent::Launch {
+                        dir: dir.clone(),
+                        command: "true".to_string(),
                     };
                     Ok::<_, String>((launch, created))
                 })
@@ -974,78 +969,6 @@ impl Root {
             None => window.focus(&self.focus_handle),
         }
         cx.notify();
-    }
-
-    /// Asks, in the system's own dialog, before removing the PR's worktree;
-    /// its terminals end first. A worktree with uncommitted changes stays.
-    fn remove_worktree(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) else {
-            return;
-        };
-        let Some(found) = self
-            .worktrees
-            .iter()
-            .find(|worktree| !worktree.main && worktree.holds(pull))
-            .cloned()
-        else {
-            return;
-        };
-        let message = format!(
-            "¿Borrar el worktree de {} #{}?",
-            pull.repo_name(),
-            pull.number
-        );
-        let detail = format!(
-            "{}\nLa rama queda; sus terminales se cierran.",
-            found.path.display()
-        );
-        let answer = window.prompt(
-            gpui::PromptLevel::Warning,
-            &message,
-            Some(&detail),
-            &[
-                gpui::PromptButton::Other("Borrar".into()),
-                gpui::PromptButton::Cancel("Cancelar".into()),
-            ],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await != Ok(0) {
-                return;
-            }
-            let ended = this
-                .update_in(cx, |this, window, cx| {
-                    let ids: Vec<_> = this
-                        .sessions
-                        .iter()
-                        .filter(|session| session.dir == found.path)
-                        .map(|session| session.id)
-                        .collect();
-                    for id in ids {
-                        this.close_session(id, window, cx);
-                    }
-                })
-                .is_ok();
-            if !ended {
-                return;
-            }
-            let target = found.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { worktree::remove(&target) })
-                .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => this
-                        .worktrees
-                        .retain(|worktree| worktree.path != found.path),
-                    Err(error) => this.folders_error = Some(error),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
     }
 
     /// Hands the PR's next action to its group's agent: opens it, waits for
@@ -1954,7 +1877,7 @@ impl Root {
 
     /// A PR's menu: hand its next action to the group's agent, ask for a
     /// review on Slack, comment `/deploy` (after asking), open
-    /// each failed check's logs, copy its URL and take it out of its group.
+    /// each failed check's logs and copy its URL.
     /// Slack and `/deploy` only on the user's own open PRs.
     fn pull_menu(&self, url: &str, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let now = now();
@@ -2000,7 +1923,7 @@ impl Root {
         if let Some(link) = self.request_link(url) {
             items.push(ui::menu_item(
                 "menu-request",
-                "Ver pedido en Slack",
+                "Slack",
                 move |_event, _window, cx| cx.open_url(&link),
             ));
         }
@@ -2086,19 +2009,10 @@ impl Root {
             }
         }
 
-        if self.folders.by_url.contains_key(url) {
-            let url = url.to_string();
-            items.push(ui::menu_item(
-                "menu-ungroup",
-                "Sacar del grupo",
-                cx.listener(move |this, _event, _window, cx| this.move_to(&url, None, cx)),
-            ));
-        }
         items
     }
 
-    /// The PR's worktree entries: Claude Code or a shell in it, made the
-    /// first time, and removing it once there is one.
+    /// The PR's terminal entry: a shell in its worktree, made the first time.
     fn worktree_items(&self, pull: &PullRequest, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         if self.opening_worktree.as_deref() == Some(pull.url.as_str()) {
             return vec![ui::menu_item(
@@ -2107,35 +2021,14 @@ impl Root {
                 |_, _, _| {},
             )];
         }
-        let found = self.worktrees.iter().find(|worktree| worktree.holds(pull));
-        let suffix = if found.is_some() {
-            "en el worktree"
-        } else {
-            "en un worktree nuevo"
-        };
-        let mut items = Vec::new();
-        for (id, kind, name) in [
-            ("menu-worktree-claude", SessionKind::Claude, "Claude"),
-            ("menu-worktree-shell", SessionKind::Shell, "Terminal"),
-        ] {
-            let url = pull.url.clone();
-            items.push(ui::menu_item(
-                id,
-                format!("{name} {suffix}"),
-                cx.listener(move |this, _event, window, cx| {
-                    this.open_in_worktree(&url, kind, window, cx)
-                }),
-            ));
-        }
-        if found.is_some_and(|worktree| !worktree.main) {
-            let url = pull.url.clone();
-            items.push(ui::menu_item(
-                "menu-worktree-remove",
-                "Borrar worktree",
-                cx.listener(move |this, _event, window, cx| this.remove_worktree(&url, window, cx)),
-            ));
-        }
-        items
+        let url = pull.url.clone();
+        vec![ui::menu_item(
+            "menu-worktree-shell",
+            "Terminal",
+            cx.listener(move |this, _event, window, cx| {
+                this.open_in_worktree(&url, SessionKind::Shell, window, cx)
+            }),
+        )]
     }
 
     /// The right-click menu, drawn over everything at the click. Any click
