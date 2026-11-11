@@ -3,21 +3,23 @@
 //! Two tabs: the PRs the user authored, grouped by what they are waiting on,
 //! and the user's merged PRs. Under each of the user's PRs sits the latest CI/CD run as the pipeline
 //! bot reports it. A sidebar holds the groups the user drags PRs into; picking
-//! one narrows every tab to it. Each group can open an agent in Orca, and the
-//! PRs from the worktrees that agent makes join the group on their own.
+//! one narrows every tab to it. Each group has an agent, Claude Code in a panel
+//! under the PRs, and the PRs from the worktrees it makes join the group on
+//! their own. A PR's worktree can hold its own Claude Code and shell, as more
+//! tabs in the panel.
 //!
 //! The open PRs reload every minute; while one of the user's deploys is running,
 //! "Mis PRs" reloads every 20 seconds so the run can be followed live. macOS
 //! notifications announce when a deploy finishes or fails and when a PR is
 //! approved.
 
+mod agent;
 mod db;
 mod dock;
 mod folders;
 mod github;
 mod merged;
 mod notify;
-mod orca;
 mod pipeline;
 mod review;
 mod review_view;
@@ -26,16 +28,19 @@ mod settings_view;
 mod slack;
 mod stack;
 mod status;
+mod terminal;
 mod text_input;
 mod theme;
 mod tool;
 mod ui;
+mod worktree;
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnimationExt, App, Application, Bounds, ClipboardItem, Context, FocusHandle, Focusable,
+    AnimationExt, App, Application, Bounds, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     FontWeight, KeyBinding, KeyDownEvent, Menu as AppMenu, MenuItem, MouseButton, MouseDownEvent,
     Pixels, Point, SharedString, SystemMenuType, TitlebarOptions, Window, WindowBounds,
     WindowOptions, actions, anchored, deferred, div, prelude::*, px, rgb, size,
@@ -49,6 +54,19 @@ actions!(
     app,
     [Refresh, ShowMine, ShowMerged, OpenSettings, Hide, Quit]
 );
+
+/// How long a fresh agent gets to show Claude Code's prompt, and how often
+/// it is checked.
+const AGENT_PROMPT_WAIT: Duration = Duration::from_secs(30);
+const AGENT_POLL: Duration = Duration::from_millis(500);
+/// The share of the window's height the agent's panel takes until resized.
+const AGENT_HEIGHT: f32 = 0.45;
+/// How short the agent's panel can get, and how much room it leaves the PRs.
+const AGENT_MIN: f32 = 120.;
+const PRS_MIN: f32 = 160.;
+/// The window's height outside the PRs and the panel: its padding, the gap
+/// and the shortcuts line at the bottom.
+const WINDOW_CHROME: f32 = 2. * 16. + 12. + 16.;
 
 /// How often the lists reload without being asked. Each reload is one GraphQL
 /// call per tab, one or two points of GitHub's 5,000-point hourly budget.
@@ -71,9 +89,10 @@ const SIDEBAR_MIN: f32 = 140.;
 const SIDEBAR_MAX: f32 = 480.;
 /// The strip between the sidebar and the PRs that resizes the sidebar.
 const HANDLE_WIDTH: f32 = 16.;
-/// The room a sidebar entry's count takes; with padding, border and gap it
-/// leaves the rest of the sidebar's width to the name.
-const COUNT_WIDTH: f32 = 20.;
+/// The room a sidebar entry's count takes, with the dot of the group's agent
+/// before it; with padding, border and gap it leaves the rest of the
+/// sidebar's width to the name.
+const COUNT_WIDTH: f32 = 32.;
 const ENTRY_CHROME: f32 = 2. * 8. + 2. + 8. + COUNT_WIDTH;
 /// The room a group's fold arrow takes, with the gap after it.
 const FOLD_WIDTH: f32 = 12. + 8.;
@@ -133,8 +152,43 @@ struct Menu {
     at: Point<Pixels>,
 }
 
-/// Which PRs the sidebar lets through to the tabs.
+/// What a terminal in the panel runs.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum SessionKind {
+    /// The group's agent, in the group's folder.
+    Agent,
+    /// Claude Code in a PR's worktree.
+    Claude,
+    /// A plain shell in a PR's worktree.
+    Shell,
+}
+
+/// A terminal in the panel, one tab.
+struct Session {
+    id: u64,
+    kind: SessionKind,
+    /// The top-level group whose panel lists it; `None` for a PR in no group.
+    group: Option<i64>,
+    /// Where it runs.
+    dir: PathBuf,
+    label: SharedString,
+    terminal: Entity<terminal::Terminal>,
+    /// What Claude was last seen doing, to notice when it stops to wait.
+    state: terminal::AgentState,
+    /// Keeps `state` following the terminal.
+    _watch: gpui::Subscription,
+}
+
+/// What a new tab is, before its terminal starts.
+struct NewSession {
+    kind: SessionKind,
+    group: Option<i64>,
+    dir: PathBuf,
+    label: SharedString,
+}
+
+/// Which PRs the sidebar lets through to the tabs.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 enum Filter {
     All,
     /// The PRs in no group.
@@ -163,6 +217,16 @@ enum Editing {
 struct ResizeSidebar;
 
 impl Render for ResizeSidebar {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// What the handle carries while the agent panel's top edge is dragged; the
+/// panel itself follows the cursor.
+struct ResizeAgent;
+
+impl Render for ResizeAgent {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         gpui::Empty
     }
@@ -328,8 +392,24 @@ struct Root {
     /// The sidebar entry under the mouse, whose name scrolls if it is cut.
     hovered: Option<Filter>,
     sidebar_width: f32,
-    /// The group whose agent is being opened in Orca.
+    /// The group whose agent is being opened.
     opening_agent: Option<i64>,
+    /// The PR whose worktree is being made or whose terminal is starting.
+    opening_worktree: Option<String>,
+    /// The panel's terminals, in the order they opened; kept running while
+    /// the panel is closed.
+    sessions: Vec<Session>,
+    next_session: u64,
+    /// The tab last picked under each selection of the sidebar.
+    active: HashMap<Filter, u64>,
+    /// Every worktree of the repos in the code folder, as of the last reload.
+    worktrees: Vec<worktree::Worktree>,
+    /// Whether the panel is open. It lists the selection's terminals,
+    /// following it, and hides while there are none.
+    panel_open: bool,
+    /// The panel's height once the user dragged its edge; until then a share
+    /// of the window's.
+    agent_height: Option<f32>,
     /// PRs whose review threads are unfolded, by URL.
     threads_open: HashSet<String>,
     /// Where the board is scrolled to, for its scrollbar.
@@ -366,6 +446,13 @@ impl Root {
             hovered: None,
             sidebar_width: SIDEBAR_WIDTH,
             opening_agent: None,
+            opening_worktree: None,
+            sessions: Vec::new(),
+            next_session: 0,
+            active: HashMap::new(),
+            worktrees: Vec::new(),
+            panel_open: false,
+            agent_height: None,
             threads_open: HashSet::new(),
             board_scroll: gpui::ScrollHandle::new(),
             board_dragging: false,
@@ -377,6 +464,7 @@ impl Root {
         root.start_clock(cx);
         Self::load_folders(cx);
         Self::load_sidebar_width(cx);
+        Self::load_agent_height(cx);
         Self::load_review_asked(cx);
         root
     }
@@ -479,7 +567,11 @@ impl Root {
         cx.spawn(async move |this, cx| {
             let (result, worktrees) = cx
                 .background_executor()
-                .spawn(async move { (github::fetch(), orca::worktrees()) })
+                .spawn(async move {
+                    let worktrees =
+                        agent::code_dir().map(|code| worktree::list(std::path::Path::new(&code)));
+                    (github::fetch(), worktrees)
+                })
                 .await;
 
             this.update(cx, |this, cx| {
@@ -487,9 +579,9 @@ impl Root {
                     this.notify_changes(&snapshot.pulls, cx);
                     this.update_badge(&snapshot.pulls);
                     this.refresh_replies(&snapshot.pulls, cx);
-                    // Without Orca there are no worktrees, and nothing to claim.
                     if let Ok(worktrees) = worktrees {
                         this.claim(&snapshot.pulls, &worktrees, cx);
+                        this.worktrees = worktrees;
                     }
                 }
                 let feed = &mut this.mine;
@@ -531,38 +623,111 @@ impl Root {
     fn claim(
         &mut self,
         pulls: &[PullRequest],
-        worktrees: &[orca::Worktree],
+        worktrees: &[worktree::Worktree],
         cx: &mut Context<Self>,
     ) {
-        for (url, id) in orca::claims(pulls, worktrees, &self.folders) {
+        for (url, id) in worktree::claims(pulls, worktrees, &self.folders) {
             self.folders.by_url.insert(url.clone(), id);
             self.folders.claimed.insert(url.clone());
             self.save(cx, move || folders::claim(&url, id));
         }
     }
 
-    /// Opens the group's agent in Orca, or goes back to the one already open.
-    /// A subgroup opens its group's.
-    fn open_agent(&mut self, id: i64, cx: &mut Context<Self>) {
-        let Some(folder) = self.folders.root(id).cloned() else {
+    /// Shows the group's agent in the panel, starting it the first time or
+    /// after it ended. A subgroup opens its group's.
+    fn open_agent(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.folders.root(id).map(|folder| folder.id) else {
             return;
         };
-        let subgroups = self.subgroups(folder.id);
+        self.with_agent(root, window, cx, |_, _, _| {});
+    }
+
+    /// The header's button: hides the panel, shows it again, or starts the
+    /// selected group's agent when the group has no terminal yet.
+    fn toggle_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shown_session().is_some() {
+            self.panel_open = false;
+            window.focus(&self.focus_handle);
+        } else if self.sessions.iter().any(|session| self.in_scope(session)) {
+            self.panel_open = true;
+            if let Some(session) = self.shown_session() {
+                window.focus(&session.terminal.focus_handle(cx));
+            }
+        } else if let Filter::Folder(root) = self.scope() {
+            self.open_agent(root, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Runs `then` with the group's agent in the panel, focused, starting it
+    /// if it isn't running.
+    fn with_agent(
+        &mut self,
+        root: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &Entity<terminal::Terminal>, &mut Context<Self>) + 'static,
+    ) {
+        // The panel shows with its group, so a request from elsewhere goes
+        // to the group.
+        if self.scope() != Filter::Folder(root) {
+            self.filter = Filter::Folder(root);
+        }
+        let existing = self
+            .sessions
+            .iter()
+            .find(|session| session.kind == SessionKind::Agent && session.group == Some(root))
+            .map(|session| (session.id, session.terminal.clone()));
+        if let Some((id, agent)) = &existing
+            && !agent.read(cx).exited
+        {
+            let agent = agent.clone();
+            self.show_session(*id, window, cx);
+            then(self, &agent, cx);
+            cx.notify();
+            return;
+        }
+        let Some(folder) = self.folders.root(root).cloned() else {
+            return;
+        };
         if self.opening_agent.is_some() {
             return;
         }
-        self.opening_agent = Some(id);
+        let subgroups = self.subgroups(folder.id);
+        let label = SharedString::from(format!("Agente · {}", folder.name));
+        self.opening_agent = Some(root);
         cx.notify();
 
-        cx.spawn(async move |this, cx| {
-            let result = cx
+        cx.spawn_in(window, async move |this, cx| {
+            let launch = cx
                 .background_executor()
-                .spawn(async move { orca::open_agent(&folder, &subgroups) })
+                .spawn(async move { agent::agent_launch(&folder, &subgroups) })
                 .await;
 
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 this.opening_agent = None;
-                this.folders_error = result.err();
+                match launch.and_then(|launch| {
+                    terminal::start(&launch.dir, &launch.command)
+                        .map(|started| (launch.dir, started))
+                }) {
+                    Ok((dir, started)) => {
+                        let terminal = cx.new(|cx| terminal::Terminal::new(started, cx));
+                        let id = this.add_session(
+                            existing.map(|(id, _)| id),
+                            NewSession {
+                                kind: SessionKind::Agent,
+                                group: Some(root),
+                                dir,
+                                label,
+                            },
+                            terminal.clone(),
+                            cx,
+                        );
+                        this.show_session(id, window, cx);
+                        then(this, &terminal, cx);
+                    }
+                    Err(error) => this.folders_error = Some(error),
+                }
                 cx.notify();
             })
             .ok();
@@ -570,9 +735,324 @@ impl Root {
         .detach();
     }
 
-    /// Hands the PR's next action to its group's agent. A PR in no group has
-    /// no agent to ask.
-    fn ask_agent(&mut self, url: &str, cx: &mut Context<Self>) {
+    /// Opens Claude Code or a shell in the PR's worktree, making the worktree
+    /// the first time; one already open there comes to the front.
+    fn open_in_worktree(
+        &mut self,
+        url: &str,
+        kind: SessionKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pull) = self
+            .mine
+            .pulls()
+            .iter()
+            .find(|pull| pull.url == url)
+            .cloned()
+        else {
+            return;
+        };
+        if self.opening_worktree.is_some() {
+            return;
+        }
+        let tag = self.folders.by_url.get(url).copied();
+        let group = tag
+            .and_then(|id| self.folders.root(id))
+            .map(|folder| folder.id);
+        let found = self
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.holds(&pull))
+            .map(|worktree| worktree.path.clone());
+        let running = found.as_ref().and_then(|dir| {
+            self.sessions
+                .iter()
+                .find(|session| {
+                    session.kind == kind && &session.dir == dir && !session.terminal.read(cx).exited
+                })
+                .map(|session| session.id)
+        });
+        if let Some(id) = running {
+            self.show_session(id, window, cx);
+            cx.notify();
+            return;
+        }
+        let replaced = found.as_ref().and_then(|dir| {
+            self.sessions
+                .iter()
+                .find(|session| session.kind == kind && &session.dir == dir)
+                .map(|session| session.id)
+        });
+        let label = SharedString::from(format!(
+            "{} · {} #{}",
+            match kind {
+                SessionKind::Shell => "Terminal",
+                _ => "Claude",
+            },
+            pull.repo_name(),
+            pull.number
+        ));
+        self.opening_worktree = Some(url.to_string());
+        self.folders_error = None;
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let made = cx
+                .background_executor()
+                .spawn(async move {
+                    let (dir, created) = match found {
+                        Some(dir) => (dir, None),
+                        None => {
+                            let code = agent::code_dir()?;
+                            let dir = worktree::create(std::path::Path::new(&code), &pull, tag)?;
+                            let created = worktree::Worktree {
+                                repo: pull.repo.to_lowercase(),
+                                branch: pull.head.clone(),
+                                path: dir.clone(),
+                                main: false,
+                                folder: tag,
+                            };
+                            (dir, Some(created))
+                        }
+                    };
+                    let launch = match kind {
+                        SessionKind::Shell => agent::Launch {
+                            dir: dir.clone(),
+                            command: "true".to_string(),
+                        },
+                        _ => agent::claude_launch(&dir)?,
+                    };
+                    Ok::<_, String>((launch, created))
+                })
+                .await;
+
+            this.update_in(cx, |this, window, cx| {
+                this.opening_worktree = None;
+                let started = made.and_then(|(launch, created)| {
+                    if let Some(created) = created {
+                        this.worktrees.push(created);
+                    }
+                    terminal::start(&launch.dir, &launch.command)
+                        .map(|started| (launch.dir, started))
+                });
+                match started {
+                    Ok((dir, started)) => {
+                        let terminal = cx.new(|cx| terminal::Terminal::new(started, cx));
+                        let id = this.add_session(
+                            replaced,
+                            NewSession {
+                                kind,
+                                group,
+                                dir,
+                                label,
+                            },
+                            terminal,
+                            cx,
+                        );
+                        if !this
+                            .sessions
+                            .iter()
+                            .any(|session| session.id == id && this.in_scope(session))
+                        {
+                            this.filter = group.map_or(Filter::Loose, Filter::Folder);
+                        }
+                        this.show_session(id, window, cx);
+                    }
+                    Err(error) => this.folders_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Puts a terminal in the panel, in place of the ended one `replaced`
+    /// names, and returns its id.
+    fn add_session(
+        &mut self,
+        replaced: Option<u64>,
+        new: NewSession,
+        terminal: Entity<terminal::Terminal>,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let NewSession {
+            kind,
+            group,
+            dir,
+            label,
+        } = new;
+        let watch = cx.observe(&terminal, |this, terminal, cx| {
+            this.watch_session(&terminal, cx)
+        });
+        let state = terminal.read(cx).state();
+        if let Some(session) =
+            replaced.and_then(|id| self.sessions.iter_mut().find(|session| session.id == id))
+        {
+            session.terminal = terminal;
+            session.state = state;
+            session._watch = watch;
+            return session.id;
+        }
+        let id = self.next_session;
+        self.next_session += 1;
+        let session = Session {
+            id,
+            kind,
+            group,
+            dir,
+            label,
+            terminal,
+            state,
+            _watch: watch,
+        };
+        // The agent goes first among its group's tabs.
+        let at = if kind == SessionKind::Agent {
+            self.sessions
+                .iter()
+                .position(|other| other.group == group)
+                .unwrap_or(self.sessions.len())
+        } else {
+            self.sessions.len()
+        };
+        self.sessions.insert(at, session);
+        id
+    }
+
+    /// Notifies when a Claude session stops working to wait for the user,
+    /// unless the app is in front showing it; the click brings the app
+    /// forward.
+    fn watch_session(&mut self, terminal: &Entity<terminal::Terminal>, cx: &mut Context<Self>) {
+        let state = terminal.read(cx).state();
+        let shown = self.shown_session().map(|session| session.id);
+        let in_front = cx.active_window().is_some();
+        let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| &session.terminal == terminal)
+        else {
+            return;
+        };
+        let stopped = session.state == terminal::AgentState::Working
+            && state == terminal::AgentState::Waiting;
+        session.state = state;
+        if !stopped || session.kind == SessionKind::Shell || (in_front && shown == Some(session.id))
+        {
+            return;
+        }
+        let notice = notify::Notice {
+            title: "Claude espera tu respuesta".to_string(),
+            subtitle: session.label.to_string(),
+            body: terminal.read(cx).title.clone().unwrap_or_default(),
+            url: String::new(),
+        };
+        cx.background_executor()
+            .spawn(async move { notify::send(&notice) })
+            .detach();
+        cx.notify();
+    }
+
+    /// Opens the panel on the terminal, focused.
+    fn show_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.active.insert(self.scope(), id);
+        self.panel_open = true;
+        if let Some(session) = self.sessions.iter().find(|session| session.id == id) {
+            window.focus(&session.terminal.focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    /// Ends the terminal and takes its tab away.
+    fn close_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(at) = self.sessions.iter().position(|session| session.id == id) {
+            self.sessions.remove(at).terminal.read(cx).close();
+        }
+        self.active.retain(|_, active| *active != id);
+        match self.shown_session() {
+            Some(session) => window.focus(&session.terminal.focus_handle(cx)),
+            None => window.focus(&self.focus_handle),
+        }
+        cx.notify();
+    }
+
+    /// Asks, in the system's own dialog, before removing the PR's worktree;
+    /// its terminals end first. A worktree with uncommitted changes stays.
+    fn remove_worktree(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) else {
+            return;
+        };
+        let Some(found) = self
+            .worktrees
+            .iter()
+            .find(|worktree| !worktree.main && worktree.holds(pull))
+            .cloned()
+        else {
+            return;
+        };
+        let message = format!(
+            "¿Borrar el worktree de {} #{}?",
+            pull.repo_name(),
+            pull.number
+        );
+        let detail = format!(
+            "{}\nLa rama queda; sus terminales se cierran.",
+            found.path.display()
+        );
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &message,
+            Some(&detail),
+            &[
+                gpui::PromptButton::Other("Borrar".into()),
+                gpui::PromptButton::Cancel("Cancelar".into()),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let ended = this
+                .update_in(cx, |this, window, cx| {
+                    let ids: Vec<_> = this
+                        .sessions
+                        .iter()
+                        .filter(|session| session.dir == found.path)
+                        .map(|session| session.id)
+                        .collect();
+                    for id in ids {
+                        this.close_session(id, window, cx);
+                    }
+                })
+                .is_ok();
+            if !ended {
+                return;
+            }
+            let target = found.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { worktree::remove(&target) })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => this
+                        .worktrees
+                        .retain(|worktree| worktree.path != found.path),
+                    Err(error) => this.folders_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Hands the PR's next action to its group's agent: opens it, waits for
+    /// Claude Code's prompt and types the request. A PR in no group has no
+    /// agent to ask, and a session still asking whether to trust its folder
+    /// gets nothing, since typing there would answer the question.
+    fn ask_agent(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pull) = self
             .mine
             .pulls()
@@ -598,27 +1078,188 @@ impl Root {
             cx.notify();
             return;
         };
-        if self.opening_agent.is_some() {
-            return;
-        }
-        let subgroups = self.subgroups(folder.id);
-        self.opening_agent = Some(folder.id);
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { orca::ask_agent(&folder, &subgroups, &pull, &task) })
-                .await;
-
-            this.update(cx, |this, cx| {
-                this.opening_agent = None;
-                this.folders_error = result.err();
+        let prompt = match agent::code_dir() {
+            Ok(code) => agent::task_prompt(&pull, &task, &folder, &code),
+            Err(error) => {
+                self.folders_error = Some(error);
                 cx.notify();
+                return;
+            }
+        };
+        self.with_agent(folder.id, window, cx, move |_, agent, cx| {
+            let agent = agent.downgrade();
+            cx.spawn(async move |this, cx| {
+                let started = Instant::now();
+                let screen = loop {
+                    let screen = agent
+                        .read_with(cx, |agent, _| {
+                            agent::screen_of(agent.screen().iter().map(String::as_str))
+                        })
+                        .unwrap_or(agent::Screen::Other);
+                    if screen != agent::Screen::Other || started.elapsed() >= AGENT_PROMPT_WAIT {
+                        break screen;
+                    }
+                    cx.background_executor().timer(AGENT_POLL).await;
+                };
+                let error = match screen {
+                    agent::Screen::Prompt => {
+                        agent.update(cx, |agent, _| agent.write(prompt.into_bytes())).ok();
+                        // Claude Code takes a fast burst as a paste; the
+                        // return must come after it to submit.
+                        cx.background_executor().timer(AGENT_POLL).await;
+                        agent.update(cx, |agent, _| agent.write(&b"\r"[..])).ok();
+                        None
+                    }
+                    agent::Screen::Trust => Some(
+                        "El agente espera que confirmes la carpeta del grupo en su panel; después vuelve a pedirle.",
+                    ),
+                    agent::Screen::Other => {
+                        Some("El agente no mostró su prompt; pídele de nuevo cuando esté listo.")
+                    }
+                };
+                this.update(cx, |this, cx| {
+                    this.folders_error = error.map(str::to_string);
+                    cx.notify();
+                })
+                .ok();
             })
-            .ok();
-        })
-        .detach();
+            .detach();
+        });
+    }
+
+    /// The panel under the PRs, as wide as the window: a tab per terminal
+    /// of the selection, and the one picked.
+    fn session_panel(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let shown = self.shown_session()?;
+        let state = shown.terminal.read(cx);
+        let caption = if state.exited {
+            "terminó · ábrelo de nuevo para reiniciarlo".to_string()
+        } else {
+            state.title.clone().unwrap_or_default()
+        };
+        let tabs: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|session| self.in_scope(session))
+            .map(|session| self.session_tab(session, session.id == shown.id, cx))
+            .collect();
+        let missing_agent = match self.scope() {
+            Filter::Folder(root)
+                if !self.sessions.iter().any(|session| {
+                    session.kind == SessionKind::Agent && session.group == Some(root)
+                }) =>
+            {
+                Some(root)
+            }
+            _ => None,
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .flex_shrink_0()
+                .h(px(self.agent_panel_height(window)))
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(theme::BORDER))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(rgb(theme::BORDER))
+                        .bg(rgb(theme::BASE))
+                        .children(tabs)
+                        .when_some(missing_agent, |this, root| {
+                            this.child(ui::button(
+                                "agent-start",
+                                if self.opening_agent.is_some() {
+                                    "Abriendo…"
+                                } else {
+                                    "+ Agente"
+                                },
+                                self.opening_agent.is_none(),
+                                cx.listener(move |this, _event, window, cx| {
+                                    this.open_agent(root, window, cx)
+                                }),
+                            ))
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .px_2()
+                                .truncate()
+                                .text_xs()
+                                .text_color(rgb(theme::MUTED))
+                                .child(caption),
+                        )
+                        .child(ui::button(
+                            "agent-close",
+                            "Ocultar",
+                            true,
+                            cx.listener(|this, _event, window, cx| {
+                                this.panel_open = false;
+                                window.focus(&this.focus_handle);
+                                cx.notify();
+                            }),
+                        )),
+                )
+                .child(div().flex_1().min_h(px(0.)).child(shown.terminal.clone())),
+        )
+    }
+
+    /// A terminal's tab: its state, its name and a cross that ends it.
+    fn session_tab(
+        &self,
+        session: &Session,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let id = session.id;
+        let state = session.terminal.read(cx).state();
+        div()
+            .id(SharedString::from(format!("tab-{id}")))
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .pl_2()
+            .pr_1()
+            .py(px(2.))
+            .rounded_md()
+            .text_xs()
+            .cursor_pointer()
+            .when(active, |this| this.bg(rgb(theme::SURFACE)))
+            .when(!active, |this| {
+                this.text_color(rgb(theme::MUTED))
+                    .hover(|style| style.bg(rgb(theme::ROW_HOVER)))
+            })
+            .on_click(
+                cx.listener(move |this, _event, window, cx| this.show_session(id, window, cx)),
+            )
+            .when(session.kind != SessionKind::Shell, |this| {
+                this.child(agent_dot(state))
+            })
+            .child(session.label.clone())
+            .child(
+                div()
+                    .id(SharedString::from(format!("tab-close-{id}")))
+                    .px_1()
+                    .rounded_sm()
+                    .text_color(rgb(theme::MUTED))
+                    .hover(|style| style.bg(rgb(theme::BORDER)))
+                    .child("×")
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        cx.stop_propagation();
+                        this.close_session(id, window, cx)
+                    })),
+            )
+            .into_any_element()
     }
 
     /// Opens the review form for the PR in its own window.
@@ -659,7 +1300,7 @@ impl Root {
             return;
         };
         let subgroups = self.subgroups(folder.id);
-        self.save(cx, move || orca::sync_subgroups(&folder, &subgroups));
+        self.save(cx, move || agent::sync_subgroups(&folder, &subgroups));
     }
 
     fn show(&mut self, tab: Tab, cx: &mut Context<Self>) {
@@ -786,6 +1427,139 @@ impl Root {
             .ok();
         })
         .detach();
+    }
+
+    fn load_agent_height(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { folders::agent_height() })
+                .await;
+
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(height) => this.agent_height = height,
+                    Err(error) => this.folders_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Follows the cursor while the agent panel's top edge is dragged;
+    /// `bounds` holds the PRs and the panel.
+    fn resize_agent(&mut self, cursor: Pixels, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
+        let most = (f32::from(bounds.size.height) - PRS_MIN).max(AGENT_MIN);
+        let height =
+            (f32::from(bounds.bottom() - cursor) - HANDLE_WIDTH / 2.).clamp(AGENT_MIN, most);
+        if Some(height) != self.agent_height {
+            self.agent_height = Some(height);
+            cx.notify();
+        }
+    }
+
+    /// The agent panel's height: the one dragged to, or a share of the
+    /// window, but never so tall that the PRs lose their room, as a height
+    /// saved in a bigger window would.
+    fn agent_panel_height(&self, window: &Window) -> f32 {
+        let window_height = f32::from(window.viewport_size().height);
+        let most = (window_height - WINDOW_CHROME - HANDLE_WIDTH - PRS_MIN).max(AGENT_MIN);
+        self.agent_height
+            .unwrap_or(window_height * AGENT_HEIGHT)
+            .clamp(AGENT_MIN, most)
+    }
+
+    /// The strip between the PRs and the agent's panel. Dragging it resizes
+    /// the panel; the height is saved once it is let go.
+    fn agent_handle(&self) -> impl IntoElement {
+        div()
+            .id("agent-handle")
+            .group("agent-handle")
+            .flex()
+            .items_center()
+            .h(px(HANDLE_WIDTH))
+            .flex_shrink_0()
+            .cursor(gpui::CursorStyle::ResizeUpDown)
+            .on_drag(ResizeAgent, |_, _, _, cx| cx.new(|_| ResizeAgent))
+            .child(
+                div()
+                    .h(px(1.))
+                    .w_full()
+                    .bg(rgb(theme::SURFACE))
+                    .group_hover("agent-handle", |style| style.bg(rgb(theme::BORDER))),
+            )
+    }
+
+    /// The sidebar's selection as the panel follows it: a subgroup counts as
+    /// its group.
+    fn scope(&self) -> Filter {
+        match self.filter {
+            Filter::Folder(id) => self
+                .folders
+                .root(id)
+                .map_or(self.filter, |folder| Filter::Folder(folder.id)),
+            other => other,
+        }
+    }
+
+    /// Whether the panel lists the terminal under the selection: a group its
+    /// own, "Sin grupo" those of PRs in no group, and "Todos" every one.
+    fn in_scope(&self, session: &Session) -> bool {
+        match self.scope() {
+            Filter::All => true,
+            Filter::Loose => session.group.is_none(),
+            Filter::Folder(root) => session.group == Some(root),
+        }
+    }
+
+    /// The terminal the panel shows now, while it is open and the selection
+    /// has one: the tab last picked there, or the first.
+    fn shown_session(&self) -> Option<&Session> {
+        if !self.panel_open {
+            return None;
+        }
+        let active = self.active.get(&self.scope());
+        let mut listed = self
+            .sessions
+            .iter()
+            .filter(|session| self.in_scope(session));
+        let first = listed.next()?;
+        std::iter::once(first)
+            .chain(listed)
+            .find(|session| Some(&session.id) == active)
+            .or(Some(first))
+    }
+
+    /// How busy the group's Claude sessions are, the busiest first: one at
+    /// work beats one waiting, which beats an ended one.
+    fn group_state(&self, root: i64, cx: &App) -> Option<terminal::AgentState> {
+        self.sessions
+            .iter()
+            .filter(|session| session.group == Some(root) && session.kind != SessionKind::Shell)
+            .map(|session| session.terminal.read(cx).state())
+            .min_by_key(|state| match state {
+                terminal::AgentState::Working => 0,
+                terminal::AgentState::Waiting => 1,
+                terminal::AgentState::Ended => 2,
+            })
+    }
+
+    /// What the header's panel button says, if the selection has anything
+    /// to show in the panel.
+    fn panel_button(&self) -> Option<&'static str> {
+        if self.opening_agent.is_some() {
+            Some("Abriendo…")
+        } else if self.shown_session().is_some() {
+            Some("Ocultar panel")
+        } else if self.sessions.iter().any(|session| self.in_scope(session)) {
+            Some("Mostrar panel")
+        } else if matches!(self.filter, Filter::Folder(_)) {
+            Some("Agente")
+        } else {
+            None
+        }
     }
 
     fn load_sidebar_width(cx: &mut Context<Self>) {
@@ -1202,6 +1976,7 @@ impl Root {
                     cx.write_to_clipboard(ClipboardItem::new_string(branch.clone()));
                 },
             ));
+            items.extend(self.worktree_items(pull, cx));
         }
         if let Some(link) = self.request_link(url) {
             items.push(ui::menu_item(
@@ -1273,7 +2048,7 @@ impl Root {
                     } else {
                         format!("Pedir al agente: {task}")
                     },
-                    cx.listener(move |this, _event, _window, cx| this.ask_agent(&asked, cx)),
+                    cx.listener(move |this, _event, window, cx| this.ask_agent(&asked, window, cx)),
                 ));
             }
             // The docs check's logs never say more than its name does.
@@ -1303,6 +2078,47 @@ impl Root {
         items
     }
 
+    /// The PR's worktree entries: Claude Code or a shell in it, made the
+    /// first time, and removing it once there is one.
+    fn worktree_items(&self, pull: &PullRequest, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        if self.opening_worktree.as_deref() == Some(pull.url.as_str()) {
+            return vec![ui::menu_item(
+                "menu-worktree-busy",
+                "Abriendo el worktree…",
+                |_, _, _| {},
+            )];
+        }
+        let found = self.worktrees.iter().find(|worktree| worktree.holds(pull));
+        let suffix = if found.is_some() {
+            "en el worktree"
+        } else {
+            "en un worktree nuevo"
+        };
+        let mut items = Vec::new();
+        for (id, kind, name) in [
+            ("menu-worktree-claude", SessionKind::Claude, "Claude"),
+            ("menu-worktree-shell", SessionKind::Shell, "Terminal"),
+        ] {
+            let url = pull.url.clone();
+            items.push(ui::menu_item(
+                id,
+                format!("{name} {suffix}"),
+                cx.listener(move |this, _event, window, cx| {
+                    this.open_in_worktree(&url, kind, window, cx)
+                }),
+            ));
+        }
+        if found.is_some_and(|worktree| !worktree.main) {
+            let url = pull.url.clone();
+            items.push(ui::menu_item(
+                "menu-worktree-remove",
+                "Borrar worktree",
+                cx.listener(move |this, _event, window, cx| this.remove_worktree(&url, window, cx)),
+            ));
+        }
+        items
+    }
+
     /// The right-click menu, drawn over everything at the click. Any click
     /// outside it closes it.
     fn menu(&self, menu: &Menu, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1319,9 +2135,9 @@ impl Root {
                     if subgroup {
                         "Abrir agente del grupo"
                     } else {
-                        "Abrir agente en Orca"
+                        "Abrir agente"
                     },
-                    cx.listener(move |this, _event, _window, cx| this.open_agent(id, cx)),
+                    cx.listener(move |this, _event, window, cx| this.open_agent(id, window, cx)),
                 )];
                 if !subgroup {
                     items.push(ui::menu_item(
@@ -1749,9 +2565,17 @@ impl Root {
                     .w(px(COUNT_WIDTH))
                     .flex_shrink_0()
                     .flex()
+                    .items_center()
                     .justify_end()
+                    .gap_1()
                     .text_xs()
                     .text_color(rgb(theme::MUTED))
+                    .when_some(
+                        entry
+                            .filter(|folder| folder.parent.is_none())
+                            .and_then(|folder| self.group_state(folder.id, cx)),
+                        |this, state| this.child(agent_dot(state)),
+                    )
                     .child(count.to_string()),
             )
             .when_some(folder, |this, id| {
@@ -1812,21 +2636,14 @@ impl Root {
                     .text_color(rgb(theme::MUTED))
                     .child(caption),
             )
-            .when_some(
-                match self.filter {
-                    Filter::Folder(id) => Some(id),
-                    _ => None,
-                },
-                |this, id| {
-                    let opening = self.opening_agent.is_some();
-                    this.child(ui::button(
-                        "agent",
-                        if opening { "Abriendo…" } else { "Agente" },
-                        !opening,
-                        cx.listener(move |this, _event, _window, cx| this.open_agent(id, cx)),
-                    ))
-                },
-            )
+            .when_some(self.panel_button(), |this, label| {
+                this.child(ui::button(
+                    "agent",
+                    label,
+                    self.opening_agent.is_none(),
+                    cx.listener(|this, _event, window, cx| this.toggle_panel(window, cx)),
+                ))
+            })
             .child(ui::button(
                 "refresh",
                 if self.refreshing() {
@@ -3247,6 +4064,23 @@ impl Render for Root {
             .text_color(rgb(theme::TEXT))
             .child(
                 div()
+                    .id("workspace")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .on_drag_move(cx.listener(
+                        |this, event: &gpui::DragMoveEvent<ResizeAgent>, _window, cx| {
+                            this.resize_agent(event.event.position.y, event.bounds, cx)
+                        },
+                    ))
+                    .on_drop(cx.listener(|this, _: &ResizeAgent, _window, cx| {
+                        if let Some(height) = this.agent_height {
+                            this.save(cx, move || folders::save_agent_height(height));
+                        }
+                    }))
+                    .child(
+                div()
                     .id("columns")
                     .flex()
                     .flex_1()
@@ -3273,11 +4107,30 @@ impl Render for Root {
                             .child(self.body(cx)),
                     ),
             )
+                    .when_some(self.session_panel(window, cx), |this, panel| {
+                        this.child(self.agent_handle()).child(panel)
+                    }),
+            )
             .when_some(self.menu.as_ref(), |this, menu| this.child(self.menu(menu, cx)))
             .child(div().text_xs().text_color(rgb(theme::MUTED)).child(
                 "clic en el título abre el PR · ⋯ o clic derecho: acciones · arrástralo a un grupo · cmd-r actualiza · cmd-1/2 pestañas · cmd-, ajustes",
             ))
     }
+}
+
+/// The dot by a group with an agent: yellow while it works, green while it
+/// waits for the user, gray once its session ended.
+fn agent_dot(state: terminal::AgentState) -> impl IntoElement {
+    let color = match state {
+        terminal::AgentState::Working => theme::YELLOW,
+        terminal::AgentState::Waiting => theme::GREEN,
+        terminal::AgentState::Ended => theme::MUTED,
+    };
+    div()
+        .size(px(6.))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(rgb(color))
 }
 
 fn main() {
