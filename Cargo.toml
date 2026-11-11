@@ -11,6 +11,7 @@ serde_json = "1"
 # The Dock badge; GPUI already builds these.
 cocoa = "0.26"
 objc = "0.2.7"
+alacritty_terminal = "0.26.0"
 
 [lints.rust]
 # objc 0.2's macros, used for the Dock badge, test a `cargo-clippy` feature.
