@@ -1968,6 +1968,25 @@ impl Root {
             },
         )];
         if let Some(pull) = self.mine.pulls().iter().find(|pull| pull.url == url) {
+            if let Some(twin) = stack::twin(pull, self.mine.pulls()) {
+                let prefix = stack::split_prefix(&twin.title).map_or("", |(prefix, _)| prefix);
+                let other = twin.url.clone();
+                items.push(ui::menu_item(
+                    "menu-copy-twin",
+                    format!("Copiar URL gemela {prefix} #{}", twin.number),
+                    move |_event, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(other.clone()));
+                    },
+                ));
+                let both = format!("{}\n{}", pull.url, twin.url);
+                items.push(ui::menu_item(
+                    "menu-copy-both",
+                    "Copiar ambas URLs",
+                    move |_event, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(both.clone()));
+                    },
+                ));
+            }
             let branch = pull.head.clone();
             items.push(ui::menu_item(
                 "menu-copy-branch",
