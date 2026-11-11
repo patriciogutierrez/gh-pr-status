@@ -62,7 +62,7 @@ pub fn list(code: &Path) -> Vec<Worktree> {
 /// `folder`.
 pub fn create(code: &Path, pull: &PullRequest, folder: Option<i64>) -> Result<PathBuf, String> {
     let repo = code.join(pull.repo_name());
-    if !repo.join(".git").is_dir() {
+    if !is_repo(&repo) {
         return Err(format!(
             "{} no está clonado en {}.",
             pull.repo_name(),
@@ -157,6 +157,22 @@ pub fn claims(
         .collect()
 }
 
+/// Whether `dir` is a repo's own checkout: a clone, whose `.git` is a
+/// folder, or a submodule, whose `.git` file points under `modules/`. A
+/// worktree's `.git` file points under `worktrees/`, and it is listed with its
+/// repo instead.
+fn is_repo(dir: &Path) -> bool {
+    let git = dir.join(".git");
+    if git.is_dir() {
+        return true;
+    }
+    std::fs::read_to_string(&git).is_ok_and(|text| {
+        text.trim()
+            .strip_prefix("gitdir:")
+            .is_some_and(|target| !target.contains("/worktrees/"))
+    })
+}
+
 /// The folders in `code` that are a repo's own checkout.
 fn repos(code: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(code) else {
@@ -165,7 +181,7 @@ fn repos(code: &Path) -> Vec<PathBuf> {
     let mut repos: Vec<_> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.join(".git").is_dir())
+        .filter(|path| is_repo(path))
         .collect();
     repos.sort();
     repos
@@ -494,6 +510,34 @@ worktree /w/db/feat-pagos\nHEAD 123\nbranch refs/heads/feat/pagos\n";
 
         assert_eq!(first, vec![(pulls[0].url.clone(), 4)]);
         assert!(second.is_empty());
+    }
+
+    #[test]
+    fn clones_and_submodules_are_repos_but_worktrees_are_not() {
+        let root = std::env::temp_dir().join(format!("gh-pr-status-repos-{}", std::process::id()));
+        let make = |name: &str, git: Option<&str>| {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            match git {
+                Some(text) => std::fs::write(dir.join(".git"), text).unwrap(),
+                None => std::fs::create_dir_all(dir.join(".git")).unwrap(),
+            }
+        };
+        make("clone", None);
+        make("submodule", Some("gitdir: ../.git/modules/submodule\n"));
+        make(
+            "worktree",
+            Some("gitdir: /code/.git/modules/x/worktrees/y\n"),
+        );
+        std::fs::create_dir_all(root.join("plain")).unwrap();
+
+        let found: Vec<_> = repos(&root)
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(found, ["clone", "submodule"]);
     }
 
     #[test]
