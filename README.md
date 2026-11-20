@@ -148,13 +148,17 @@ navegador en vez de traer la app al frente, para no lanzar la copia instalada.
   botón **Agente** (o clic derecho → «Abrir agente») abre una terminal con
   `claude --add-dir ~/code` en la carpeta del grupo, para conversar qué hay que hacer y en qué
   repos; vuelve a la conversación anterior del grupo si la hay (`--continue`). El mismo botón
-  («Ocultar panel») lo oculta, y las sesiones siguen corriendo hasta cerrar la app.
+  («Ocultar panel») lo oculta, y las sesiones siguen corriendo hasta cerrar la app. Un grupo
+  puede tener **varios agentes a la vez**: con uno corriendo, «+ Agente» en el panel (o clic
+  derecho → «Nuevo agente») abre otra pestaña («Agente 2 · …») en la misma carpeta, con una
+  conversación nueva. «Pedir al agente» le escribe al agente que tienes a la vista, o si no al
+  primero que esté corriendo.
 - **Worktrees sin Orca**: «Terminal» en el menú de un PR abre una shell en el worktree de su
   rama. Si no hay uno, lo crea en `~/orca/workspaces/<repo>/<rama>` desde el repo de `~/code`, y
   Orca lo muestra cuando lo abras. Cada terminal es
   una pestaña del panel, con × para cerrarla. El panel lista las de lo elegido en la barra
   lateral: un grupo, su agente y las de sus PRs; «Sin grupo», las de PRs sin grupo; «Todos»,
-  todas. En un grupo sin agente, «+ Agente» lo abre. En la barra lateral, un punto junto al
+  todas. En un grupo sin agente, «+ Agente» lo abre; con uno, suma otro. En la barra lateral, un punto junto al
   contador resume los Claude del grupo: amarillo si alguno trabaja, verde si esperan tu
   respuesta y gris si terminaron. Su altura se ajusta arrastrando el borde de arriba y se
   recuerda. La terminal funciona como las de
