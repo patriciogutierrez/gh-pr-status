@@ -5,8 +5,9 @@
 //! branch it tags with the group (see `worktree`); the PRs opened from tagged
 //! branches join the group on their own. Subgroups share their group's agent:
 //! the app lists their numbers in `subgrupos.md`, so the agent tags each branch
-//! with the subgroup it is for. Everything here blocks and runs on the
-//! background executor.
+//! with the subgroup it is for. A group can run more agents side by side,
+//! each in a tab of its own and a new conversation, all in the same folder.
+//! Everything here blocks and runs on the background executor.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -41,14 +42,16 @@ pub struct Launch {
     pub command: String,
 }
 
-/// The group's agent: Claude Code in the group's folder, made the first
-/// time, reading every repo, and back in its last conversation if it had
-/// one. `folder` is a top-level group and `subgroups` its subgroups.
-pub fn agent_launch(folder: &Folder, subgroups: &[Folder]) -> Result<Launch, String> {
+/// A group's agent: Claude Code in the group's folder, made the first
+/// time, reading every repo. With `resume` it goes back to the folder's last
+/// conversation if there was one; without it, it starts a new one, as the
+/// group's extra agents do. `folder` is a top-level group and `subgroups`
+/// its subgroups.
+pub fn agent_launch(folder: &Folder, subgroups: &[Folder], resume: bool) -> Result<Launch, String> {
     let dir = agent_dir(folder)?;
     write_subgroups_file(&dir, folder, subgroups)?;
     let mut command = format!("claude --add-dir {}", quote(&code_dir()?));
-    if has_conversation(&dir)? {
+    if resume && has_conversation(&dir)? {
         command.push_str(" --continue");
     }
     Ok(Launch { dir, command })

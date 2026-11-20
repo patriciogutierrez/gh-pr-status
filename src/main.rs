@@ -3,8 +3,8 @@
 //! Two tabs: the PRs the user authored, grouped by what they are waiting on,
 //! and the user's merged PRs. Under each of the user's PRs sits the latest CI/CD run as the pipeline
 //! bot reports it. A sidebar holds the groups the user drags PRs into; picking
-//! one narrows every tab to it. Each group has an agent, Claude Code in a panel
-//! under the PRs, and the PRs from the worktrees it makes join the group on
+//! one narrows every tab to it. Each group has agents, Claude Code in tabs of a
+//! panel under the PRs, and the PRs from the worktrees they make join the group on
 //! their own. A PR's worktree can hold its own shell, as another tab in the
 //! panel.
 //!
@@ -170,6 +170,8 @@ struct Session {
     /// Where it runs.
     dir: PathBuf,
     label: SharedString,
+    /// Which of its group's agents it is, from 1; 0 for a shell.
+    nth: usize,
     terminal: Entity<terminal::Terminal>,
     /// What Claude was last seen doing, to notice when it stops to wait.
     state: terminal::AgentState,
@@ -183,6 +185,7 @@ struct NewSession {
     group: Option<i64>,
     dir: PathBuf,
     label: SharedString,
+    nth: usize,
 }
 
 /// Which PRs the sidebar lets through to the tabs.
@@ -657,8 +660,26 @@ impl Root {
         cx.notify();
     }
 
-    /// Runs `then` with the group's agent in the panel, focused, starting it
-    /// if it isn't running.
+    /// Opens one more agent for the group, in a tab of its own and a new
+    /// conversation. A subgroup opens one for its group.
+    fn new_agent(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.folders.root(id).map(|folder| folder.id) else {
+            return;
+        };
+        self.filter = Filter::Folder(root);
+        self.start_agent(root, None, false, window, cx, |_, _, _| {});
+    }
+
+    /// The group's agents, in their tabs' order.
+    fn group_agents(&self, root: i64) -> impl Iterator<Item = &Session> {
+        self.sessions.iter().filter(move |session| {
+            session.kind == SessionKind::Agent && session.group == Some(root)
+        })
+    }
+
+    /// Runs `then` with one of the group's agents in the panel, focused: the
+    /// one shown if it is running, else the first running, else the first
+    /// started again in its last conversation.
     fn with_agent(
         &mut self,
         root: i64,
@@ -671,35 +692,57 @@ impl Root {
         if self.scope() != Filter::Folder(root) {
             self.filter = Filter::Folder(root);
         }
-        let existing = self
-            .sessions
-            .iter()
-            .find(|session| session.kind == SessionKind::Agent && session.group == Some(root))
+        let shown = self
+            .shown_session()
+            .filter(|session| session.kind == SessionKind::Agent && session.group == Some(root));
+        let running = shown
+            .into_iter()
+            .chain(self.group_agents(root))
+            .find(|session| !session.terminal.read(cx).exited)
             .map(|session| (session.id, session.terminal.clone()));
-        if let Some((id, agent)) = &existing
-            && !agent.read(cx).exited
-        {
-            let agent = agent.clone();
-            self.show_session(*id, window, cx);
+        if let Some((id, agent)) = running {
+            self.show_session(id, window, cx);
             then(self, &agent, cx);
             cx.notify();
             return;
         }
+        let ended = self.group_agents(root).next().map(|session| session.id);
+        self.start_agent(root, ended, true, window, cx, then);
+    }
+
+    /// Starts an agent for the group, in place of the ended tab `replaced`
+    /// names or in a new one, and runs `then` with it shown. With `resume`
+    /// it goes back to the folder's last conversation.
+    fn start_agent(
+        &mut self,
+        root: i64,
+        replaced: Option<u64>,
+        resume: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &Entity<terminal::Terminal>, &mut Context<Self>) + 'static,
+    ) {
         let Some(folder) = self.folders.root(root).cloned() else {
             return;
         };
         if self.opening_agent.is_some() {
             return;
         }
+        let nth = (1..)
+            .find(|nth| !self.group_agents(root).any(|session| session.nth == *nth))
+            .unwrap_or(1);
+        let label = SharedString::from(match nth {
+            1 => format!("Agente · {}", folder.name),
+            nth => format!("Agente {nth} · {}", folder.name),
+        });
         let subgroups = self.subgroups(folder.id);
-        let label = SharedString::from(format!("Agente · {}", folder.name));
         self.opening_agent = Some(root);
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
             let launch = cx
                 .background_executor()
-                .spawn(async move { agent::agent_launch(&folder, &subgroups) })
+                .spawn(async move { agent::agent_launch(&folder, &subgroups, resume) })
                 .await;
 
             this.update_in(cx, |this, window, cx| {
@@ -711,12 +754,13 @@ impl Root {
                     Ok((dir, started)) => {
                         let terminal = cx.new(|cx| terminal::Terminal::new(started, cx));
                         let id = this.add_session(
-                            existing.map(|(id, _)| id),
+                            replaced,
                             NewSession {
                                 kind: SessionKind::Agent,
                                 group: Some(root),
                                 dir,
                                 label,
+                                nth,
                             },
                             terminal.clone(),
                             cx,
@@ -841,6 +885,7 @@ impl Root {
                                 group,
                                 dir,
                                 label,
+                                nth: 0,
                             },
                             terminal,
                             cx,
@@ -877,6 +922,7 @@ impl Root {
             group,
             dir,
             label,
+            nth,
         } = new;
         let watch = cx.observe(&terminal, |this, terminal, cx| {
             this.watch_session(&terminal, cx)
@@ -898,16 +944,26 @@ impl Root {
             group,
             dir,
             label,
+            nth,
             terminal,
             state,
             _watch: watch,
         };
-        // The agent goes first among its group's tabs.
+        // The agents go first among their group's tabs, in the order they
+        // opened.
         let at = if kind == SessionKind::Agent {
-            self.sessions
+            let last_agent = self
+                .sessions
                 .iter()
-                .position(|other| other.group == group)
-                .unwrap_or(self.sessions.len())
+                .rposition(|other| other.kind == SessionKind::Agent && other.group == group);
+            match last_agent {
+                Some(at) => at + 1,
+                None => self
+                    .sessions
+                    .iter()
+                    .position(|other| other.group == group)
+                    .unwrap_or(self.sessions.len()),
+            }
         } else {
             self.sessions.len()
         };
@@ -1066,14 +1122,14 @@ impl Root {
             .filter(|session| self.in_scope(session))
             .map(|session| self.session_tab(session, session.id == shown.id, cx))
             .collect();
-        let missing_agent = match self.scope() {
-            Filter::Folder(root)
-                if !self.sessions.iter().any(|session| {
-                    session.kind == SessionKind::Agent && session.group == Some(root)
-                }) =>
-            {
-                Some(root)
-            }
+        // The group's "+ Agente": its agent when none is running, one more
+        // when one is.
+        let add_agent = match self.scope() {
+            Filter::Folder(root) => Some((
+                root,
+                self.group_agents(root)
+                    .any(|session| !session.terminal.read(cx).exited),
+            )),
             _ => None,
         };
         Some(
@@ -1097,7 +1153,7 @@ impl Root {
                         .border_color(rgb(theme::BORDER))
                         .bg(rgb(theme::BASE))
                         .children(tabs)
-                        .when_some(missing_agent, |this, root| {
+                        .when_some(add_agent, |this, (root, running)| {
                             this.child(ui::button(
                                 "agent-start",
                                 if self.opening_agent.is_some() {
@@ -1107,7 +1163,11 @@ impl Root {
                                 },
                                 self.opening_agent.is_none(),
                                 cx.listener(move |this, _event, window, cx| {
-                                    this.open_agent(root, window, cx)
+                                    if running {
+                                        this.new_agent(root, window, cx)
+                                    } else {
+                                        this.open_agent(root, window, cx)
+                                    }
                                 }),
                             ))
                         })
@@ -2051,6 +2111,15 @@ impl Root {
                     },
                     cx.listener(move |this, _event, window, cx| this.open_agent(id, window, cx)),
                 )];
+                items.push(ui::menu_item(
+                    "menu-new-agent",
+                    if subgroup {
+                        "Nuevo agente del grupo"
+                    } else {
+                        "Nuevo agente"
+                    },
+                    cx.listener(move |this, _event, window, cx| this.new_agent(id, window, cx)),
+                ));
                 if !subgroup {
                     items.push(ui::menu_item(
                         "menu-subgroup",
